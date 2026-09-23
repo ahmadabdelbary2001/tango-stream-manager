@@ -11,8 +11,11 @@ target/
 .env.*
 !.env.example
 
+# Python
 tools/python-poc/.venv/
-__pycache__/
+**/.venv/
+**/__pycache__/
+*.pyc
 *.py[cod]
 
 *.log

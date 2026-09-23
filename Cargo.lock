@@ -17,3 +17,7 @@ version = "0.1.0"
 [[package]]
 name = "ports"
 version = "0.1.0"
+
+[[package]]
+name = "video-composition"
+version = "0.1.0"
