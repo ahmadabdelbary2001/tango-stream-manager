@@ -187,6 +187,7 @@ pub enum CompositionError {
     InvalidCanvasSize,
     InvalidZoom,
     InvalidCropFrame,
+    InvalidAspectRatio,
     CropFrameOutsideVideo,
 }
 
@@ -207,6 +208,12 @@ impl fmt::Display for CompositionError {
             }
             Self::InvalidCropFrame => {
                 write!(f, "crop frame must have positive dimensions")
+            }
+            Self::InvalidAspectRatio => {
+                write!(
+                    f,
+                    "aspect ratio must be a finite value greater than zero"
+                )
             }
             Self::CropFrameOutsideVideo => {
                 write!(
@@ -260,6 +267,46 @@ fn validate_crop_frame(
     }
 
     Ok(())
+}
+
+/// Calculate a centered crop frame with a requested aspect ratio.
+///
+/// The frame is the largest rectangle with the requested ratio
+/// that fits inside both the canvas and the requested maximum size.
+pub fn calculate_centered_crop_frame(
+    canvas: Size,
+    aspect_ratio: f64,
+    max_frame_size: Size,
+) -> Result<Rect, CompositionError> {
+    validate_canvas(canvas)?;
+
+    if !aspect_ratio.is_finite() || aspect_ratio <= 0.0 {
+        return Err(CompositionError::InvalidAspectRatio);
+    }
+
+    if max_frame_size.width <= 0.0
+        || max_frame_size.height <= 0.0
+    {
+        return Err(CompositionError::InvalidCropFrame);
+    }
+
+    let max_width = max_frame_size.width.min(canvas.width);
+    let max_height = max_frame_size.height.min(canvas.height);
+
+    let width_from_height = max_height * aspect_ratio;
+
+    let (width, height) = if width_from_height <= max_width {
+        (width_from_height, max_height)
+    } else {
+        (max_width, max_width / aspect_ratio)
+    };
+
+    Ok(Rect::new(
+        (canvas.width - width) / 2.0,
+        (canvas.height - height) / 2.0,
+        width,
+        height,
+    ))
 }
 
 /// Calculate the Fill scale needed to cover the canvas
@@ -787,6 +834,126 @@ mod tests {
         assert_close(
             source_ratio,
             frame_ratio,
+        );
+    }
+}
+
+#[cfg(test)]
+mod crop_frame_tests {
+    use super::*;
+
+    const EPSILON: f64 = 0.0001;
+
+    fn assert_close(
+        actual: f64,
+        expected: f64,
+    ) {
+        assert!(
+            (actual - expected).abs() < EPSILON,
+            "actual={actual}, expected={expected}"
+        );
+    }
+
+    fn canvas() -> Size {
+        Size::new(720.0, 1280.0)
+    }
+
+    #[test]
+    fn centered_crop_frame_9x16_matches_preview() {
+        let frame =
+            calculate_centered_crop_frame(
+                canvas(),
+                9.0 / 16.0,
+                Size::new(360.0, 640.0),
+            )
+            .unwrap();
+
+        assert_close(frame.x, 180.0);
+        assert_close(frame.y, 320.0);
+        assert_close(frame.width, 360.0);
+        assert_close(frame.height, 640.0);
+    }
+    #[test]
+    fn centered_crop_frame_16x9_is_constrained_by_width() {
+        let frame =
+            calculate_centered_crop_frame(
+                canvas(),
+                16.0 / 9.0,
+                Size::new(
+                    600.0,
+                    600.0,
+                ),
+            )
+            .unwrap();
+
+        assert_close(
+            frame.x,
+            60.0,
+        );
+
+        assert_close(
+            frame.y,
+            471.25,
+        );
+
+        assert_close(
+            frame.width,
+            600.0,
+        );
+
+        assert_close(
+            frame.height,
+            337.5,
+        );
+    }
+
+    #[test]
+    fn centered_crop_frame_1x1_is_square() {
+        let frame =
+            calculate_centered_crop_frame(
+                canvas(),
+                1.0,
+                Size::new(
+                    600.0,
+                    900.0,
+                ),
+            )
+            .unwrap();
+
+        assert_close(
+            frame.x,
+            60.0,
+        );
+
+        assert_close(
+            frame.y,
+            340.0,
+        );
+
+        assert_close(
+            frame.width,
+            600.0,
+        );
+
+        assert_close(
+            frame.height,
+            600.0,
+        );
+    }
+
+    #[test]
+    fn invalid_aspect_ratio_is_rejected() {
+        assert_eq!(
+            calculate_centered_crop_frame(
+                canvas(),
+                0.0,
+                Size::new(
+                    360.0,
+                    640.0,
+                ),
+            )
+            .unwrap_err(),
+            CompositionError::InvalidAspectRatio
         );
     }
 }
