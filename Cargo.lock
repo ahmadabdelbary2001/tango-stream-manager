@@ -427,9 +427,11 @@ dependencies = [
 name = "infrastructure"
 version = "0.1.0"
 dependencies = [
+ "domain",
  "obws",
  "ports",
  "tokio",
+ "video-composition",
 ]
 
 [[package]]
