@@ -1,14 +1,13 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+﻿pub mod obs_video_output;
+
+pub use obs_video_output::ObsVideoOutput;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::ObsVideoOutput;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn test_infrastructure_exports() {
+        let _ = std::mem::size_of::<ObsVideoOutput>();
     }
 }
