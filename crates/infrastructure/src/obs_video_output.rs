@@ -142,3 +142,108 @@ fn build_scene_item_transform(
         rotation: None,
     })
 }
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+    use domain::{
+        CropRegion, MediaAssetId, VideoComposition, VideoSource, VideoTransform as DomainTransform,
+    };
+    use ports::FrameSize;
+
+    fn base_request() -> VideoOutputRequest {
+        VideoOutputRequest::new(
+            "Tango Scene",
+            "Tango Video",
+            "E:\\video.mp4",
+            FrameSize::new(568, 762).unwrap(),
+            FrameSize::new(720, 1280).unwrap(),
+            VideoComposition {
+                source: VideoSource::Original {
+                    asset_id: MediaAssetId("video-1".into()),
+                },
+                crop: None,
+                transform: DomainTransform::default(),
+            },
+        )
+    }
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    // fill_scale for source 568x762 in canvas 720x1280 = 1280/762.
+    fn fill_scale() -> f32 {
+        (1280.0_f64 / 762.0) as f32
+    }
+
+    #[test]
+    fn default_transform_produces_centered_filled_geometry() {
+        let t = build_scene_item_transform(&base_request()).unwrap();
+
+        let crop = t.crop.expect("crop must always be sent");
+        assert_eq!(crop.left, Some(0));
+        assert_eq!(crop.top, Some(0));
+        assert_eq!(crop.right, Some(0));
+        assert_eq!(crop.bottom, Some(0));
+
+        let pos = t.position.expect("position must always be sent");
+        assert!(approx(pos.x.unwrap(), 360.0));
+        assert!(approx(pos.y.unwrap(), 640.0));
+
+        let sc = t.scale.expect("scale must always be sent");
+        assert!(approx(sc.x.unwrap(), fill_scale()));
+        assert!(approx(sc.y.unwrap(), fill_scale()));
+
+        assert_eq!(t.alignment.unwrap(), Alignment::CENTER);
+        assert_eq!(t.bounds.unwrap().r#type.unwrap(), BoundsType::None);
+    }
+
+    #[test]
+    fn crop_is_converted_to_source_pixels() {
+        let mut req = base_request();
+        req.composition.crop = CropRegion::new(0.10, 0.10, 0.10, 0.10);
+
+        let t = build_scene_item_transform(&req).unwrap();
+        let crop = t.crop.unwrap();
+
+        // source = 568x762
+        // left  = round(0.10 * 568) = round(56.8) = 57
+        // top   = round(0.10 * 762) = round(76.2) = 76
+        assert_eq!(crop.left, Some(57));
+        assert_eq!(crop.top, Some(76));
+        assert_eq!(crop.right, Some(57));
+        assert_eq!(crop.bottom, Some(76));
+    }
+
+    #[test]
+    fn pan_shifts_position_without_changing_scale() {
+        let mut req = base_request();
+        req.composition.transform.pan_y = 100.0;
+
+        let t = build_scene_item_transform(&req).unwrap();
+
+        let pos = t.position.unwrap();
+        assert!(approx(pos.x.unwrap(), 360.0));
+        assert!(approx(pos.y.unwrap(), 740.0));
+
+        let sc = t.scale.unwrap();
+        assert!(approx(sc.x.unwrap(), fill_scale()));
+        assert!(approx(sc.y.unwrap(), fill_scale()));
+    }
+
+    #[test]
+    fn zoom_multiplies_fill_scale() {
+        let mut req = base_request();
+        req.composition.transform.zoom = 2.0;
+
+        let t = build_scene_item_transform(&req).unwrap();
+        let sc = t.scale.unwrap();
+        assert!(approx(sc.x.unwrap(), fill_scale() * 2.0));
+        assert!(approx(sc.y.unwrap(), fill_scale() * 2.0));
+
+        let pos = t.position.unwrap();
+        assert!(approx(pos.x.unwrap(), 360.0));
+        assert!(approx(pos.y.unwrap(), 640.0));
+    }
+}
