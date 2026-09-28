@@ -36,12 +36,7 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub fn new(
-        x: f64,
-        y: f64,
-        width: f64,
-        height: f64,
-    ) -> Self {
+    pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
         Self {
             x,
             y,
@@ -67,10 +62,7 @@ impl Rect {
     }
 
     pub fn center(&self) -> Point {
-        Point::new(
-            self.x + self.width / 2.0,
-            self.y + self.height / 2.0,
-        )
+        Point::new(self.x + self.width / 2.0, self.y + self.height / 2.0)
     }
 }
 
@@ -96,16 +88,8 @@ impl Default for VideoTransform {
 }
 
 impl VideoTransform {
-    pub fn new(
-        zoom: f64,
-        pan_x: f64,
-        pan_y: f64,
-    ) -> Self {
-        Self {
-            zoom,
-            pan_x,
-            pan_y,
-        }
+    pub fn new(zoom: f64, pan_x: f64, pan_y: f64) -> Self {
+        Self { zoom, pan_x, pan_y }
     }
 }
 
@@ -132,22 +116,12 @@ pub struct SourceCrop {
 }
 
 impl SourceCrop {
-    pub fn width(
-        &self,
-        source: Size,
-    ) -> f64 {
-        source.width
-            - self.left
-            - self.right
+    pub fn width(&self, source: Size) -> f64 {
+        source.width - self.left - self.right
     }
 
-    pub fn height(
-        &self,
-        source: Size,
-    ) -> f64 {
-        source.height
-            - self.top
-            - self.bottom
+    pub fn height(&self, source: Size) -> f64 {
+        source.height - self.top - self.bottom
     }
 }
 
@@ -169,11 +143,7 @@ pub struct PanLimits {
 }
 
 impl PanLimits {
-    pub fn clamp(
-        &self,
-        pan_x: f64,
-        pan_y: f64,
-    ) -> Point {
+    pub fn clamp(&self, pan_x: f64, pan_y: f64) -> Point {
         Point::new(
             pan_x.clamp(self.min_x, self.max_x),
             pan_y.clamp(self.min_y, self.max_y),
@@ -192,10 +162,7 @@ pub enum CompositionError {
 }
 
 impl fmt::Display for CompositionError {
-    fn fmt(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-    ) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidSourceSize => {
                 write!(f, "source size must be greater than zero")
@@ -210,10 +177,7 @@ impl fmt::Display for CompositionError {
                 write!(f, "crop frame must have positive dimensions")
             }
             Self::InvalidAspectRatio => {
-                write!(
-                    f,
-                    "aspect ratio must be a finite value greater than zero"
-                )
+                write!(f, "aspect ratio must be a finite value greater than zero")
             }
             Self::CropFrameOutsideVideo => {
                 write!(
@@ -227,43 +191,25 @@ impl fmt::Display for CompositionError {
 
 impl std::error::Error for CompositionError {}
 
-fn validate_size(
-    size: Size,
-) -> Result<(), CompositionError> {
-    if size.width <= 0.0
-        || size.height <= 0.0
-    {
-        return Err(
-            CompositionError::InvalidSourceSize
-        );
+fn validate_size(size: Size) -> Result<(), CompositionError> {
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return Err(CompositionError::InvalidSourceSize);
     }
 
     Ok(())
 }
 
-fn validate_canvas(
-    canvas: Size,
-) -> Result<(), CompositionError> {
-    if canvas.width <= 0.0
-        || canvas.height <= 0.0
-    {
-        return Err(
-            CompositionError::InvalidCanvasSize
-        );
+fn validate_canvas(canvas: Size) -> Result<(), CompositionError> {
+    if canvas.width <= 0.0 || canvas.height <= 0.0 {
+        return Err(CompositionError::InvalidCanvasSize);
     }
 
     Ok(())
 }
 
-fn validate_crop_frame(
-    crop_frame: Rect,
-) -> Result<(), CompositionError> {
-    if crop_frame.width <= 0.0
-        || crop_frame.height <= 0.0
-    {
-        return Err(
-            CompositionError::InvalidCropFrame
-        );
+fn validate_crop_frame(crop_frame: Rect) -> Result<(), CompositionError> {
+    if crop_frame.width <= 0.0 || crop_frame.height <= 0.0 {
+        return Err(CompositionError::InvalidCropFrame);
     }
 
     Ok(())
@@ -284,9 +230,7 @@ pub fn calculate_centered_crop_frame(
         return Err(CompositionError::InvalidAspectRatio);
     }
 
-    if max_frame_size.width <= 0.0
-        || max_frame_size.height <= 0.0
-    {
+    if max_frame_size.width <= 0.0 || max_frame_size.height <= 0.0 {
         return Err(CompositionError::InvalidCropFrame);
     }
 
@@ -311,17 +255,11 @@ pub fn calculate_centered_crop_frame(
 
 /// Calculate the Fill scale needed to cover the canvas
 /// while preserving the video's aspect ratio.
-pub fn calculate_fill_scale(
-    source: Size,
-    canvas: Size,
-) -> Result<f64, CompositionError> {
+pub fn calculate_fill_scale(source: Size, canvas: Size) -> Result<f64, CompositionError> {
     validate_size(source)?;
     validate_canvas(canvas)?;
 
-    Ok(
-        (canvas.width / source.width)
-            .max(canvas.height / source.height)
-    )
+    Ok((canvas.width / source.width).max(canvas.height / source.height))
 }
 
 /// Calculate the complete rendered video geometry.
@@ -330,36 +268,26 @@ pub fn calculate_geometry(
     canvas: Size,
     transform: VideoTransform,
 ) -> Result<Geometry, CompositionError> {
-    let fill_scale =
-        calculate_fill_scale(source, canvas)?;
+    let fill_scale = calculate_fill_scale(source, canvas)?;
 
     if transform.zoom <= 0.0 {
-        return Err(
-            CompositionError::InvalidZoom
-        );
+        return Err(CompositionError::InvalidZoom);
     }
 
-    let effective_scale =
-        fill_scale * transform.zoom;
+    let effective_scale = fill_scale * transform.zoom;
 
     let rendered_size = Size::new(
         source.width * effective_scale,
         source.height * effective_scale,
     );
 
-    let center_x =
-        canvas.width / 2.0
-            + transform.pan_x;
+    let center_x = canvas.width / 2.0 + transform.pan_x;
 
-    let center_y =
-        canvas.height / 2.0
-            + transform.pan_y;
+    let center_y = canvas.height / 2.0 + transform.pan_y;
 
     let rendered_rect = Rect::new(
-        center_x
-            - rendered_size.width / 2.0,
-        center_y
-            - rendered_size.height / 2.0,
+        center_x - rendered_size.width / 2.0,
+        center_y - rendered_size.height / 2.0,
         rendered_size.width,
         rendered_size.height,
     );
@@ -382,51 +310,31 @@ pub fn preview_to_source(
 ) -> Result<CropResult, CompositionError> {
     validate_crop_frame(crop_frame)?;
 
-    let geometry =
-        calculate_geometry(
-            source,
-            canvas,
-            transform,
-        )?;
+    let geometry = calculate_geometry(source, canvas, transform)?;
 
-    let video =
-        geometry.rendered_rect;
+    let video = geometry.rendered_rect;
 
     const EPSILON: f64 = 1e-9;
 
-    if crop_frame.left()
-        < video.left() - EPSILON
-        || crop_frame.right()
-            > video.right() + EPSILON
-        || crop_frame.top()
-            < video.top() - EPSILON
-        || crop_frame.bottom()
-            > video.bottom() + EPSILON
+    if crop_frame.left() < video.left() - EPSILON
+        || crop_frame.right() > video.right() + EPSILON
+        || crop_frame.top() < video.top() - EPSILON
+        || crop_frame.bottom() > video.bottom() + EPSILON
     {
-        return Err(
-            CompositionError::CropFrameOutsideVideo
-        );
+        return Err(CompositionError::CropFrameOutsideVideo);
     }
 
     let source_left =
-        ((crop_frame.left() - video.left())
-            / geometry.effective_scale)
-            .clamp(0.0, source.width);
+        ((crop_frame.left() - video.left()) / geometry.effective_scale).clamp(0.0, source.width);
 
     let source_top =
-        ((crop_frame.top() - video.top())
-            / geometry.effective_scale)
-            .clamp(0.0, source.height);
+        ((crop_frame.top() - video.top()) / geometry.effective_scale).clamp(0.0, source.height);
 
     let source_right =
-        ((crop_frame.right() - video.left())
-            / geometry.effective_scale)
-            .clamp(0.0, source.width);
+        ((crop_frame.right() - video.left()) / geometry.effective_scale).clamp(0.0, source.width);
 
     let source_bottom =
-        ((crop_frame.bottom() - video.top())
-            / geometry.effective_scale)
-            .clamp(0.0, source.height);
+        ((crop_frame.bottom() - video.top()) / geometry.effective_scale).clamp(0.0, source.height);
 
     let source_rect = Rect::new(
         source_left,
@@ -463,75 +371,42 @@ pub fn calculate_pan_limits(
     validate_crop_frame(crop_frame)?;
 
     if zoom <= 0.0 {
-        return Err(
-            CompositionError::InvalidZoom
-        );
+        return Err(CompositionError::InvalidZoom);
     }
 
-    let fill_scale =
-        calculate_fill_scale(source, canvas)?;
+    let fill_scale = calculate_fill_scale(source, canvas)?;
 
-    let scale =
-        fill_scale * zoom;
+    let scale = fill_scale * zoom;
 
-    let rendered_width =
-        source.width * scale;
+    let rendered_width = source.width * scale;
 
-    let rendered_height =
-        source.height * scale;
+    let rendered_height = source.height * scale;
 
-    let extra_width =
-        rendered_width
-            - crop_frame.width;
+    let extra_width = rendered_width - crop_frame.width;
 
-    let extra_height =
-        rendered_height
-            - crop_frame.height;
+    let extra_height = rendered_height - crop_frame.height;
 
-    if extra_width < 0.0
-        || extra_height < 0.0
-    {
-        return Err(
-            CompositionError::CropFrameOutsideVideo
-        );
+    if extra_width < 0.0 || extra_height < 0.0 {
+        return Err(CompositionError::CropFrameOutsideVideo);
     }
 
-    let half_extra_x =
-        extra_width / 2.0;
+    let half_extra_x = extra_width / 2.0;
 
-    let half_extra_y =
-        extra_height / 2.0;
+    let half_extra_y = extra_height / 2.0;
 
-    let frame_center =
-        crop_frame.center();
+    let frame_center = crop_frame.center();
 
-    let canvas_center =
-        Point::new(
-            canvas.width / 2.0,
-            canvas.height / 2.0,
-        );
+    let canvas_center = Point::new(canvas.width / 2.0, canvas.height / 2.0);
 
-    let center_delta_x =
-        frame_center.x
-            - canvas_center.x;
+    let center_delta_x = frame_center.x - canvas_center.x;
 
-    let center_delta_y =
-        frame_center.y
-            - canvas_center.y;
+    let center_delta_y = frame_center.y - canvas_center.y;
 
     Ok(PanLimits {
-        min_x:
-            center_delta_x
-                - half_extra_x,
-        max_x:
-            center_delta_x
-                + half_extra_x,
-        min_y:
-            center_delta_y
-                - half_extra_y,
-        max_y:
-            center_delta_y
-                + half_extra_y,
+        min_x: center_delta_x - half_extra_x,
+        max_x: center_delta_x + half_extra_x,
+        min_y: center_delta_y - half_extra_y,
+        max_y: center_delta_y + half_extra_y,
     })
 }
 
@@ -541,13 +416,9 @@ mod tests {
 
     const EPSILON: f64 = 0.0001;
 
-    fn assert_close(
-        actual: f64,
-        expected: f64,
-    ) {
+    fn assert_close(actual: f64, expected: f64) {
         assert!(
-            (actual - expected).abs()
-                < EPSILON,
+            (actual - expected).abs() < EPSILON,
             "actual={actual}, expected={expected}"
         );
     }
@@ -561,280 +432,122 @@ mod tests {
     }
 
     fn crop_frame() -> Rect {
-        Rect::new(
-            180.0,
-            160.0,
-            360.0,
-            640.0,
-        )
+        Rect::new(180.0, 160.0, 360.0, 640.0)
     }
 
     #[test]
     fn fill_scale_matches_python_poc() {
-        let scale =
-            calculate_fill_scale(
-                source(),
-                canvas(),
-            )
-            .unwrap();
+        let scale = calculate_fill_scale(source(), canvas()).unwrap();
 
-        assert_close(
-            scale,
-            1.6797900262467191,
-        );
+        assert_close(scale, 1.6797900262467191);
     }
 
     #[test]
     fn centered_fill_matches_python_poc() {
-        let geometry =
-            calculate_geometry(
-                source(),
-                canvas(),
-                VideoTransform::default(),
-            )
-            .unwrap();
+        let geometry = calculate_geometry(source(), canvas(), VideoTransform::default()).unwrap();
 
-        assert_close(
-            geometry.effective_scale,
-            1.6797900262467191,
-        );
+        assert_close(geometry.effective_scale, 1.6797900262467191);
 
-        assert_close(
-            geometry.rendered_size.width,
-            954.1207349081365,
-        );
+        assert_close(geometry.rendered_size.width, 954.1207349081365);
 
-        assert_close(
-            geometry.rendered_size.height,
-            1280.0,
-        );
+        assert_close(geometry.rendered_size.height, 1280.0);
 
-        assert_close(
-            geometry.rendered_rect.x,
-            -117.06036745406823,
-        );
+        assert_close(geometry.rendered_rect.x, -117.06036745406823);
 
-        assert_close(
-            geometry.rendered_rect.y,
-            0.0,
-        );
+        assert_close(geometry.rendered_rect.y, 0.0);
     }
 
     #[test]
     fn zoom_changes_scale_without_distortion() {
         let geometry =
-            calculate_geometry(
-                source(),
-                canvas(),
-                VideoTransform::new(
-                    1.20,
-                    0.0,
-                    0.0,
-                ),
-            )
-            .unwrap();
+            calculate_geometry(source(), canvas(), VideoTransform::new(1.20, 0.0, 0.0)).unwrap();
 
-        assert_close(
-            geometry.effective_scale,
-            2.015748031496063,
-        );
+        assert_close(geometry.effective_scale, 2.015748031496063);
 
-        let ratio =
-            geometry.rendered_size.width
-                / geometry.rendered_size.height;
+        let ratio = geometry.rendered_size.width / geometry.rendered_size.height;
 
-        let source_ratio =
-            source().width
-                / source().height;
+        let source_ratio = source().width / source().height;
 
-        assert_close(
-            ratio,
-            source_ratio,
-        );
+        assert_close(ratio, source_ratio);
     }
 
     #[test]
     fn pan_moves_video_without_changing_size() {
-        let centered =
-            calculate_geometry(
-                source(),
-                canvas(),
-                VideoTransform::default(),
-            )
-            .unwrap();
+        let centered = calculate_geometry(source(), canvas(), VideoTransform::default()).unwrap();
 
         let panned =
-            calculate_geometry(
-                source(),
-                canvas(),
-                VideoTransform::new(
-                    1.20,
-                    -70.0,
-                    25.0,
-                ),
-            )
-            .unwrap();
+            calculate_geometry(source(), canvas(), VideoTransform::new(1.20, -70.0, 25.0)).unwrap();
 
-        assert_close(
-            centered.rendered_size.width,
-            954.1207349081365,
-        );
+        assert_close(centered.rendered_size.width, 954.1207349081365);
 
-        assert_close(
-            panned.rendered_size.width,
-            1144.9448818897638,
-        );
+        assert_close(panned.rendered_size.width, 1144.9448818897638);
 
-        assert_close(
-            panned.rendered_rect.center().x,
-            290.0,
-        );
+        assert_close(panned.rendered_rect.center().x, 290.0);
 
-        assert_close(
-            panned.rendered_rect.center().y,
-            665.0,
-        );
+        assert_close(panned.rendered_rect.center().y, 665.0);
     }
 
     #[test]
     fn crop_frame_maps_to_source_coordinates() {
         let result =
-            preview_to_source(
-                source(),
-                canvas(),
-                VideoTransform::default(),
-                crop_frame(),
-            )
-            .unwrap();
+            preview_to_source(source(), canvas(), VideoTransform::default(), crop_frame()).unwrap();
 
-        assert_close(
-            result.source_rect.x,
-            176.84375,
-        );
+        assert_close(result.source_rect.x, 176.84375);
 
-        assert_close(
-            result.source_rect.y,
-            95.25,
-        );
+        assert_close(result.source_rect.y, 95.25);
 
-        assert_close(
-            result.source_rect.width,
-            214.3125,
-        );
+        assert_close(result.source_rect.width, 214.3125);
 
-        assert_close(
-            result.source_rect.height,
-            381.0,
-        );
+        assert_close(result.source_rect.height, 381.0);
 
-        assert_close(
-            result.crop.left,
-            176.84375,
-        );
+        assert_close(result.crop.left, 176.84375);
 
-        assert_close(
-            result.crop.right,
-            176.84375,
-        );
+        assert_close(result.crop.right, 176.84375);
 
-        assert_close(
-            result.crop.top,
-            95.25,
-        );
+        assert_close(result.crop.top, 95.25);
 
-        assert_close(
-            result.crop.bottom,
-            285.75,
-        );
+        assert_close(result.crop.bottom, 285.75);
     }
 
     #[test]
     fn pan_limits_match_python_poc() {
-        let limits =
-            calculate_pan_limits(
-                source(),
-                canvas(),
-                crop_frame(),
-                1.20,
-            )
-            .unwrap();
+        let limits = calculate_pan_limits(source(), canvas(), crop_frame(), 1.20).unwrap();
 
-        assert_close(
-            limits.min_x,
-            -392.4724409448819,
-        );
+        assert_close(limits.min_x, -392.4724409448819);
 
-        assert_close(
-            limits.max_x,
-            392.4724409448819,
-        );
+        assert_close(limits.max_x, 392.4724409448819);
 
-        assert_close(
-            limits.min_y,
-            -608.0,
-        );
+        assert_close(limits.min_y, -608.0);
 
-        assert_close(
-            limits.max_y,
-            288.0,
-        );
+        assert_close(limits.max_y, 288.0);
     }
 
     #[test]
     fn pan_clamping_works() {
-        let limits =
-            calculate_pan_limits(
-                source(),
-                canvas(),
-                crop_frame(),
-                1.20,
-            )
-            .unwrap();
+        let limits = calculate_pan_limits(source(), canvas(), crop_frame(), 1.20).unwrap();
 
-        let clamped =
-            limits.clamp(
-                9999.0,
-                -9999.0,
-            );
+        let clamped = limits.clamp(9999.0, -9999.0);
 
-        assert_close(
-            clamped.x,
-            limits.max_x,
-        );
+        assert_close(clamped.x, limits.max_x);
 
-        assert_close(
-            clamped.y,
-            limits.min_y,
-        );
+        assert_close(clamped.y, limits.min_y);
     }
 
     #[test]
     fn crop_preserves_requested_preview_aspect_ratio() {
-        let result =
-            preview_to_source(
-                source(),
-                canvas(),
-                VideoTransform::new(
-                    1.20,
-                    -70.0,
-                    25.0,
-                ),
-                crop_frame(),
-            )
-            .unwrap();
+        let result = preview_to_source(
+            source(),
+            canvas(),
+            VideoTransform::new(1.20, -70.0, 25.0),
+            crop_frame(),
+        )
+        .unwrap();
 
-        let source_ratio =
-            result.source_rect.width
-                / result.source_rect.height;
+        let source_ratio = result.source_rect.width / result.source_rect.height;
 
-        let frame_ratio =
-            crop_frame().width
-                / crop_frame().height;
+        let frame_ratio = crop_frame().width / crop_frame().height;
 
-        assert_close(
-            source_ratio,
-            frame_ratio,
-        );
+        assert_close(source_ratio, frame_ratio);
     }
 }
 
@@ -844,10 +557,7 @@ mod crop_frame_tests {
 
     const EPSILON: f64 = 0.0001;
 
-    fn assert_close(
-        actual: f64,
-        expected: f64,
-    ) {
+    fn assert_close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() < EPSILON,
             "actual={actual}, expected={expected}"
@@ -861,12 +571,7 @@ mod crop_frame_tests {
     #[test]
     fn centered_crop_frame_9x16_matches_preview() {
         let frame =
-            calculate_centered_crop_frame(
-                canvas(),
-                9.0 / 16.0,
-                Size::new(360.0, 640.0),
-            )
-            .unwrap();
+            calculate_centered_crop_frame(canvas(), 9.0 / 16.0, Size::new(360.0, 640.0)).unwrap();
 
         assert_close(frame.x, 180.0);
         assert_close(frame.y, 320.0);
@@ -876,83 +581,34 @@ mod crop_frame_tests {
     #[test]
     fn centered_crop_frame_16x9_is_constrained_by_width() {
         let frame =
-            calculate_centered_crop_frame(
-                canvas(),
-                16.0 / 9.0,
-                Size::new(
-                    600.0,
-                    600.0,
-                ),
-            )
-            .unwrap();
+            calculate_centered_crop_frame(canvas(), 16.0 / 9.0, Size::new(600.0, 600.0)).unwrap();
 
-        assert_close(
-            frame.x,
-            60.0,
-        );
+        assert_close(frame.x, 60.0);
 
-        assert_close(
-            frame.y,
-            471.25,
-        );
+        assert_close(frame.y, 471.25);
 
-        assert_close(
-            frame.width,
-            600.0,
-        );
+        assert_close(frame.width, 600.0);
 
-        assert_close(
-            frame.height,
-            337.5,
-        );
+        assert_close(frame.height, 337.5);
     }
 
     #[test]
     fn centered_crop_frame_1x1_is_square() {
-        let frame =
-            calculate_centered_crop_frame(
-                canvas(),
-                1.0,
-                Size::new(
-                    600.0,
-                    900.0,
-                ),
-            )
-            .unwrap();
+        let frame = calculate_centered_crop_frame(canvas(), 1.0, Size::new(600.0, 900.0)).unwrap();
 
-        assert_close(
-            frame.x,
-            60.0,
-        );
+        assert_close(frame.x, 60.0);
 
-        assert_close(
-            frame.y,
-            340.0,
-        );
+        assert_close(frame.y, 340.0);
 
-        assert_close(
-            frame.width,
-            600.0,
-        );
+        assert_close(frame.width, 600.0);
 
-        assert_close(
-            frame.height,
-            600.0,
-        );
+        assert_close(frame.height, 600.0);
     }
 
     #[test]
     fn invalid_aspect_ratio_is_rejected() {
         assert_eq!(
-            calculate_centered_crop_frame(
-                canvas(),
-                0.0,
-                Size::new(
-                    360.0,
-                    640.0,
-                ),
-            )
-            .unwrap_err(),
+            calculate_centered_crop_frame(canvas(), 0.0, Size::new(360.0, 640.0,),).unwrap_err(),
             CompositionError::InvalidAspectRatio
         );
     }

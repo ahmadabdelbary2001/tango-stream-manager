@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    MediaAssetId,
-    MediaVariantId,
-};
+use crate::{MediaAssetId, MediaVariantId};
 
 /// An aspect ratio represented as a simplified integer ratio.
 ///
@@ -11,25 +8,14 @@ use crate::{
 /// - 720x1280 -> 9:16
 /// - 1920x1080 -> 16:9
 /// - 1080x1080 -> 1:1
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AspectRatio {
     pub width: u32,
     pub height: u32,
 }
 
 impl AspectRatio {
-    pub fn new(
-        width: u32,
-        height: u32,
-    ) -> Option<Self> {
+    pub fn new(width: u32, height: u32) -> Option<Self> {
         if width == 0 || height == 0 {
             return None;
         }
@@ -43,15 +29,11 @@ impl AspectRatio {
     }
 
     pub fn value(self) -> f64 {
-        self.width as f64
-            / self.height as f64
+        self.width as f64 / self.height as f64
     }
 }
 
-fn gcd(
-    mut a: u32,
-    mut b: u32,
-) -> u32 {
+fn gcd(mut a: u32, mut b: u32) -> u32 {
     while b != 0 {
         let remainder = a % b;
         a = b;
@@ -68,14 +50,7 @@ fn gcd(
 ///
 /// Variant:
 ///     a previously prepared/cropped version of that asset.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoSource {
     Original {
         asset_id: MediaAssetId,
@@ -101,14 +76,7 @@ pub enum VideoSource {
 /// means 10% cropped from both left and right.
 ///
 /// We deliberately do NOT store OBS pixel crop values here.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Serialize,
-    Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CropRegion {
     pub left: f64,
     pub top: f64,
@@ -117,12 +85,7 @@ pub struct CropRegion {
 }
 
 impl CropRegion {
-    pub fn new(
-        left: f64,
-        top: f64,
-        right: f64,
-        bottom: f64,
-    ) -> Option<Self> {
+    pub fn new(left: f64, top: f64, right: f64, bottom: f64) -> Option<Self> {
         let region = Self {
             left,
             top,
@@ -154,14 +117,7 @@ impl CropRegion {
 /// User-controlled runtime transform.
 ///
 /// Rotation is intentionally absent from the model.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Serialize,
-    Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct VideoTransform {
     /// 1.0 = normal size.
     ///
@@ -194,13 +150,7 @@ impl Default for VideoTransform {
 ///
 /// `transform` always exists because zoom/pan are optional
 /// values with a neutral default.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Serialize,
-    Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VideoComposition {
     pub source: VideoSource,
 
@@ -218,13 +168,7 @@ pub struct VideoComposition {
 ///
 /// The actual CropRegion is calculated only when the user
 /// presses "Apply Crop".
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Serialize,
-    Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VideoCompositionDraft {
     pub source: VideoSource,
 
@@ -240,9 +184,7 @@ mod tests {
 
     #[test]
     fn aspect_ratio_720x1280_becomes_9x16() {
-        let ratio =
-            AspectRatio::new(720, 1280)
-                .unwrap();
+        let ratio = AspectRatio::new(720, 1280).unwrap();
 
         assert_eq!(
             ratio,
@@ -255,9 +197,7 @@ mod tests {
 
     #[test]
     fn aspect_ratio_1920x1080_becomes_16x9() {
-        let ratio =
-            AspectRatio::new(1920, 1080)
-                .unwrap();
+        let ratio = AspectRatio::new(1920, 1080).unwrap();
 
         assert_eq!(
             ratio,
@@ -270,52 +210,23 @@ mod tests {
 
     #[test]
     fn zero_aspect_ratio_is_invalid() {
-        assert!(
-            AspectRatio::new(0, 1280)
-                .is_none()
-        );
+        assert!(AspectRatio::new(0, 1280).is_none());
 
-        assert!(
-            AspectRatio::new(720, 0)
-                .is_none()
-        );
+        assert!(AspectRatio::new(720, 0).is_none());
     }
 
     #[test]
     fn valid_crop_region_is_accepted() {
-        let crop =
-            CropRegion::new(
-                0.1,
-                0.0,
-                0.1,
-                0.0,
-            )
-            .unwrap();
+        let crop = CropRegion::new(0.1, 0.0, 0.1, 0.0).unwrap();
 
         assert!(crop.is_valid());
     }
 
     #[test]
     fn crop_region_cannot_remove_entire_axis() {
-        assert!(
-            CropRegion::new(
-                0.5,
-                0.0,
-                0.5,
-                0.0,
-            )
-            .is_none()
-        );
+        assert!(CropRegion::new(0.5, 0.0, 0.5, 0.0,).is_none());
 
-        assert!(
-            CropRegion::new(
-                0.0,
-                0.5,
-                0.0,
-                0.5,
-            )
-            .is_none()
-        );
+        assert!(CropRegion::new(0.0, 0.5, 0.0, 0.5,).is_none());
     }
 
     #[test]
@@ -332,51 +243,30 @@ mod tests {
 
     #[test]
     fn draft_can_represent_crop_mode_without_committing_crop() {
-        let draft =
-            VideoCompositionDraft {
-                source:
-                    VideoSource::Original {
-                        asset_id:
-                            MediaAssetId(
-                                "video-1".into(),
-                            ),
-                    },
+        let draft = VideoCompositionDraft {
+            source: VideoSource::Original {
+                asset_id: MediaAssetId("video-1".into()),
+            },
 
-                crop_aspect_ratio:
-                    Some(
-                        AspectRatio::new(
-                            720,
-                            1280,
-                        )
-                        .unwrap(),
-                    ),
+            crop_aspect_ratio: Some(AspectRatio::new(720, 1280).unwrap()),
 
-                transform:
-                    VideoTransform {
-                        zoom: 1.2,
-                        pan_x: -70.0,
-                        pan_y: 25.0,
-                    },
-            };
+            transform: VideoTransform {
+                zoom: 1.2,
+                pan_x: -70.0,
+                pan_y: 25.0,
+            },
+        };
 
         assert_eq!(
-            draft
-                .crop_aspect_ratio
-                .unwrap(),
+            draft.crop_aspect_ratio.unwrap(),
             AspectRatio {
                 width: 9,
                 height: 16,
             }
         );
 
-        assert_eq!(
-            draft.transform.zoom,
-            1.2
-        );
+        assert_eq!(draft.transform.zoom, 1.2);
 
-        assert_eq!(
-            draft.transform.pan_x,
-            -70.0
-        );
+        assert_eq!(draft.transform.pan_x, -70.0);
     }
 }

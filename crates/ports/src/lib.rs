@@ -1,4 +1,4 @@
-﻿use domain::VideoComposition;
+use domain::VideoComposition;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,18 +77,12 @@ pub trait VideoOutputPort {
 mod tests {
     use super::*;
 
-    use domain::{
-        MediaAssetId,
-        VideoSource,
-        VideoTransform,
-    };
+    use domain::{MediaAssetId, VideoSource, VideoTransform};
 
     fn composition() -> VideoComposition {
         VideoComposition {
             source: VideoSource::Original {
-                asset_id: MediaAssetId(
-                    "video-1".into(),
-                ),
+                asset_id: MediaAssetId("video-1".into()),
             },
 
             crop: None,
@@ -99,13 +93,9 @@ mod tests {
 
     #[test]
     fn frame_size_rejects_zero_dimensions() {
-        assert!(
-            FrameSize::new(0, 1280).is_none()
-        );
+        assert!(FrameSize::new(0, 1280).is_none());
 
-        assert!(
-            FrameSize::new(720, 0).is_none()
-        );
+        assert!(FrameSize::new(720, 0).is_none());
     }
 
     #[test]
@@ -121,43 +111,25 @@ mod tests {
 
     #[test]
     fn output_request_preserves_composition() {
-        let source_size =
-            FrameSize::new(568, 762)
-                .unwrap();
+        let source_size = FrameSize::new(568, 762).unwrap();
 
-        let canvas_size =
-            FrameSize::new(720, 1280)
-                .unwrap();
+        let canvas_size = FrameSize::new(720, 1280).unwrap();
 
-        let request =
-            VideoOutputRequest::new(
-                "Tango Scene",
-                "Tango Video",
-                "E:\\video.mp4",
-                source_size,
-                canvas_size,
-                composition(),
-            );
-
-        assert_eq!(
-            request.scene_name,
-            "Tango Scene"
+        let request = VideoOutputRequest::new(
+            "Tango Scene",
+            "Tango Video",
+            "E:\\video.mp4",
+            source_size,
+            canvas_size,
+            composition(),
         );
 
-        assert_eq!(
-            request.source_name,
-            "Tango Video"
-        );
+        assert_eq!(request.scene_name, "Tango Scene");
 
-        assert_eq!(
-            request.source_size,
-            source_size
-        );
+        assert_eq!(request.source_name, "Tango Video");
 
-        assert_eq!(
-            request.canvas_size,
-            canvas_size
-        );
+        assert_eq!(request.source_size, source_size);
+
+        assert_eq!(request.canvas_size, canvas_size);
     }
 }
-
