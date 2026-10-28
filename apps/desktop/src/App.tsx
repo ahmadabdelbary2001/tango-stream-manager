@@ -68,6 +68,13 @@ export default function App() {
   // ── Profiles ────────────────────────────────────────────────────────────
   const [profiles, setProfiles] = useState<ProfileSummaryDto[]>([]);
   const [activeProfile, setActiveProfileState] = useState<ProfileSummaryDto | null>(null);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [profileNameDraft, setProfileNameDraft] = useState("");
+  const [isRenamingProfile, setIsRenamingProfile] = useState(false);
+  const [profileRenameMessage, setProfileRenameMessage] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
   const [streamKey, setStreamKey] = useState<string>("");
   const [showStreamKey, setShowStreamKey] = useState(false);
   const [keySavedMessage, setKeySavedMessage] = useState<string | null>(null);
@@ -265,6 +272,46 @@ export default function App() {
     }
   }
 
+  function handleStartRenameProfile(profile: ProfileSummaryDto) {
+    setEditingProfileId(profile.id);
+    setProfileNameDraft(profile.name);
+    setProfileRenameMessage(null);
+  }
+
+  function handleCancelRenameProfile() {
+    setEditingProfileId(null);
+    setProfileNameDraft("");
+    setProfileRenameMessage(null);
+  }
+
+  async function handleRenameProfile(profile: ProfileSummaryDto) {
+    const name = profileNameDraft.trim();
+    if (!name) {
+      setProfileRenameMessage({ success: false, message: "Profile name cannot be empty." });
+      return;
+    }
+    if (name === profile.name) {
+      handleCancelRenameProfile();
+      return;
+    }
+
+    setIsRenamingProfile(true);
+    setProfileRenameMessage(null);
+    try {
+      const updated = await updateProfile({ ...profile, name });
+      setProfiles((current) => current.map((item) => item.id === updated.id ? updated : item));
+      if (activeProfile?.id === updated.id) {
+        setActiveProfileState(updated);
+      }
+      setEditingProfileId(null);
+      setProfileNameDraft("");
+      setProfileRenameMessage({ success: true, message: `Profile renamed to "${updated.name}".` });
+    } catch (err) {
+      setProfileRenameMessage({ success: false, message: `Failed to rename profile: ${String(err)}` });
+    } finally {
+      setIsRenamingProfile(false);
+    }
+  }
   async function handleCreateProfile() {
     if (!newProfileName.trim()) return;
     try {
@@ -621,48 +668,125 @@ export default function App() {
       </header>
 
       {/* ── Profile Toolbar ── */}
-      <div className="profiles-bar">
-        <div className="profile-selector-group">
-          <label className="form-label" style={{ fontWeight: 600 }}>Active Profile:</label>
-          <select
-            className="profile-select"
-            value={activeProfile?.id ?? ""}
-            onChange={(e) => handleSwitchProfile(e.target.value)}
-            disabled={isStreaming}
-          >
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} {p.has_credential ? "🔒" : "⚠️ (No Key)"}
-              </option>
-            ))}
-          </select>
+      <section className="profiles-panel" aria-label="Streaming profiles">
+        <div className="profiles-panel-heading">
+          <div>
+            <h2 className="profiles-heading">Streaming Profiles</h2>
+            <p className="profiles-caption">All profiles stay visible. Select a card to make it active, or rename it in place.</p>
+          </div>
+          <div className="profile-actions">
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setShowNewProfileModal(true)}
+              disabled={isStreaming || editingProfileId !== null}
+            >
+              + New Profile
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={handleDuplicateProfile}
+              disabled={isStreaming || !activeProfile || editingProfileId !== null}
+            >
+              Duplicate Active
+            </button>
+            <button
+              className="btn btn-danger btn-sm"
+              onClick={() => setShowDeleteConfirm(true)}
+              disabled={isStreaming || profiles.length <= 1 || !activeProfile || editingProfileId !== null}
+            >
+              Delete Active
+            </button>
+          </div>
         </div>
 
-        <div className="profile-actions">
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={() => setShowNewProfileModal(true)}
-            disabled={isStreaming}
-          >
-            + New Profile
-          </button>
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={handleDuplicateProfile}
-            disabled={isStreaming || !activeProfile}
-          >
-            Duplicate
-          </button>
-          <button
-            className="btn btn-danger btn-sm"
-            onClick={() => setShowDeleteConfirm(true)}
-            disabled={isStreaming || profiles.length <= 1}
-          >
-            Delete Profile
-          </button>
-        </div>
-      </div>
+        <div className="profile-cards-grid">
+          {profiles.map((profile) => {
+            const selected = activeProfile?.id === profile.id;
+            const editing = editingProfileId === profile.id;
+            return (
+              <article
+                key={profile.id}
+                className={`profile-tile ${selected ? "is-active" : ""}`}
+              >
+                <div className="profile-tile-top">
+                  <button
+                    type="button"
+                    className="profile-tile-select"
+                    onClick={() => { void handleSwitchProfile(profile.id); }}
+                    disabled={isStreaming || isRenamingProfile || editingProfileId !== null}
+                    aria-pressed={selected}
+                  >
+                    <span className="profile-indicator" aria-hidden="true" />
+                    <span className="profile-tile-text">
+                      <strong>{profile.name}</strong>
+                      <span>{selected ? "ACTIVE PROFILE" : "Select to activate"}</span>
+                    </span>
+                  </button>
+                  <span className={`profile-credential ${profile.has_credential ? "has-key" : "no-key"}`}>
+                    {profile.has_credential ? "Key saved" : "No key"}
+                  </span>
+                </div>
 
+                {editing ? (
+                  <form
+                    className="profile-rename-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void handleRenameProfile(profile);
+                    }}
+                  >
+                    <label className="form-label" htmlFor={`profile-name-${profile.id}`}>Profile Name</label>
+                    <input
+                      id={`profile-name-${profile.id}`}
+                      className="form-input"
+                      value={profileNameDraft}
+                      onChange={(event) => setProfileNameDraft(event.target.value)}
+                      maxLength={60}
+                      autoFocus
+                      required
+                    />
+                    <div className="profile-rename-actions">
+                      <button
+                        className="btn btn-primary btn-sm"
+                        type="submit"
+                        disabled={isRenamingProfile || !profileNameDraft.trim()}
+                      >
+                        {isRenamingProfile ? "Saving…" : "Save Name"}
+                      </button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        type="button"
+                        onClick={handleCancelRenameProfile}
+                        disabled={isRenamingProfile}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm profile-rename-trigger"
+                    onClick={() => handleStartRenameProfile(profile)}
+                    disabled={isStreaming || isRenamingProfile || editingProfileId !== null}
+                  >
+                    Rename Profile
+                  </button>
+                )}
+              </article>
+            );
+          })}
+          {profiles.length === 0 && (
+            <div className="profiles-empty">No profiles yet. Create a profile to get started.</div>
+          )}
+        </div>
+
+        {profileRenameMessage && (
+          <div className={`alert-box ${profileRenameMessage.success ? "alert-success" : "alert-error"}`} role="status">
+            <span>{profileRenameMessage.message}</span>
+          </div>
+        )}
+      </section>
       {/* ── Main Dashboard Grid ── */}
       <div className="dashboard-grid">
 
