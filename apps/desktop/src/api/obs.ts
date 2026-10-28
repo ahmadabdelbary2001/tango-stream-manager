@@ -87,6 +87,16 @@ export interface ObsVideoSettingsPayload {
   fps_denominator: number;
 }
 
+export interface AppliedObsQualitySettingsPayload {
+  output_mode: string;
+  video_settings: ObsVideoSettingsPayload;
+  video_bitrate_kbps: number;
+  audio_bitrate_kbps: number;
+  encoder: string;
+  rate_control: string;
+  keyframe_interval_sec: number;
+}
+
 // ---------------------------------------------------------------------------
 // Streaming & Health types
 // ---------------------------------------------------------------------------
@@ -238,6 +248,17 @@ export async function setObsVideoSettings(
   return invoke<void>("set_obs_video_settings", { obsConfig, settings });
 }
 
+export async function applyObsQualitySettings(
+  obsConfig: ObsConnectionConfig,
+  settings: ObsVideoSettingsPayload,
+  quality: QualitySettings
+): Promise<AppliedObsQualitySettingsPayload> {
+  return invoke<AppliedObsQualitySettingsPayload>("apply_obs_quality_settings", {
+    obsConfig,
+    settings,
+    quality,
+  });
+}
 // ---------------------------------------------------------------------------
 // Streaming control commands
 // ---------------------------------------------------------------------------

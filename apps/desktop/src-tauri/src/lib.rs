@@ -133,6 +133,17 @@ pub struct ObsVideoSettingsPayload {
     pub fps_denominator: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppliedObsQualitySettingsPayload {
+    pub output_mode: String,
+    pub video_settings: ObsVideoSettingsPayload,
+    pub video_bitrate_kbps: u32,
+    pub audio_bitrate_kbps: u32,
+    pub encoder: String,
+    pub rate_control: String,
+    pub keyframe_interval_sec: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Streaming & Health Payloads
 // ---------------------------------------------------------------------------
@@ -508,6 +519,48 @@ async fn set_obs_video_settings(
 // Tauri commands — streaming control & live metrics
 // ---------------------------------------------------------------------------
 
+#[tauri::command]
+async fn apply_obs_quality_settings(
+    obs_config: ObsConnectionConfig,
+    settings: ObsVideoSettingsPayload,
+    quality: QualitySettings,
+) -> Result<AppliedObsQualitySettingsPayload, String> {
+    let output = make_output(&obs_config)?;
+    let domain_settings = ObsVideoSettings {
+        base_width: settings.base_width,
+        base_height: settings.base_height,
+        output_width: settings.output_width,
+        output_height: settings.output_height,
+        fps_numerator: settings.fps_numerator,
+        fps_denominator: settings.fps_denominator,
+    };
+
+    let encoder = output
+        .apply_quality_settings_async(&domain_settings, &quality)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let actual = output.get_video_settings_async().await.map_err(|error| {
+        format!("OBS quality was applied, but final video settings could not be read: {error}")
+    })?;
+
+    Ok(AppliedObsQualitySettingsPayload {
+        output_mode: "Simple".into(),
+        video_settings: ObsVideoSettingsPayload {
+            base_width: actual.base_width,
+            base_height: actual.base_height,
+            output_width: actual.output_width,
+            output_height: actual.output_height,
+            fps_numerator: actual.fps_numerator,
+            fps_denominator: actual.fps_denominator,
+        },
+        video_bitrate_kbps: quality.video_bitrate_kbps,
+        audio_bitrate_kbps: quality.audio_bitrate_kbps,
+        encoder,
+        rate_control: "CBR".into(),
+        keyframe_interval_sec: 2,
+    })
+}
 #[tauri::command]
 async fn get_stream_status(obs_config: ObsConnectionConfig) -> Result<StreamStatusPayload, String> {
     let output = make_output(&obs_config)?;
@@ -887,6 +940,7 @@ pub fn run() {
             apply_video_composition,
             get_obs_video_settings,
             set_obs_video_settings,
+            apply_obs_quality_settings,
             get_stream_status,
             start_stream,
             start_profile_stream,

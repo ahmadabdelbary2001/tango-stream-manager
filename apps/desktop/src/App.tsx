@@ -6,7 +6,7 @@ import {
   calculatePanLimits,
   probeVideoDimensions,
   getObsVideoSettings,
-  setObsVideoSettings,
+  applyObsQualitySettings,
   getStreamStatus,
   startProfileStream,
   stopStream,
@@ -530,25 +530,31 @@ export default function App() {
   async function handleApplyVideoSettingsToObs() {
     if (!activeProfile) return;
     if (streamStatus?.active) {
-      alert("OBS does not support changing video output resolution or FPS while live streaming. Stop the stream first.");
+      setQualityMessage({
+        success: false,
+        message: "Stop the active stream before applying video and encoder quality settings.",
+      });
       return;
     }
     setIsApplyingQuality(true);
     setQualityMessage(null);
     try {
-      await setObsVideoSettings(obsConfig, {
-        base_width: activeProfile.composition.canvas_width,
-        base_height: activeProfile.composition.canvas_height,
-        output_width: activeProfile.quality.output_width,
-        output_height: activeProfile.quality.output_height,
-        fps_numerator: activeProfile.quality.fps,
-        fps_denominator: 1,
-      });
-      const vs = await getObsVideoSettings(obsConfig);
-      setObsVideoSettingsState(vs);
+      const applied = await applyObsQualitySettings(
+        obsConfig,
+        {
+          base_width: activeProfile.composition.canvas_width,
+          base_height: activeProfile.composition.canvas_height,
+          output_width: activeProfile.quality.output_width,
+          output_height: activeProfile.quality.output_height,
+          fps_numerator: activeProfile.quality.fps,
+          fps_denominator: 1,
+        },
+        activeProfile.quality
+      );
+      setObsVideoSettingsState(applied.video_settings);
       setQualityMessage({
         success: true,
-        message: `OBS video settings updated to ${activeProfile.quality.output_width}x${activeProfile.quality.output_height} @ ${activeProfile.quality.fps}fps!`,
+        message: `OBS Simple Output settings saved and read back: ${applied.video_settings.output_width}x${applied.video_settings.output_height} @ ${Math.round(applied.video_settings.fps_numerator / (applied.video_settings.fps_denominator || 1))} FPS, video ${applied.video_bitrate_kbps} Kbps, audio ${applied.audio_bitrate_kbps} Kbps, encoder ${applied.encoder}, rate control ${applied.rate_control}, keyframe ${applied.keyframe_interval_sec}s. Encoder settings take effect on the next stream start.`,
       });
     } catch (err) {
       setQualityMessage({
@@ -1283,10 +1289,10 @@ export default function App() {
                 title={
                   isStreaming
                     ? "OBS requires stopping the live stream to change output resolution."
-                    : "Stage output dimensions and FPS in OBS"
+                    : "Apply video and encoder quality settings in OBS Simple Output mode"
                 }
               >
-                {isApplyingQuality ? "Applying…" : "Apply Output Settings to OBS"}
+                {isApplyingQuality ? "Applying…" : "Apply Quality Settings to OBS"}
               </button>
             </div>
           </div>
@@ -1295,7 +1301,7 @@ export default function App() {
             <div className="alert-box alert-warning">
               <strong>Live Stream Active:</strong>
               <span>
-                Output resolution and framerate cannot be changed while streaming. Bitrate adjustments can be applied or managed via OBS dynamic bitrate.
+                Stop the active stream before applying resolution, FPS, bitrate, or encoder settings. This workflow currently supports OBS Simple Output mode; Advanced Output is rejected safely.
               </span>
             </div>
           )}
