@@ -76,6 +76,96 @@ pub trait VideoOutputPort {
     ) -> Result<(), VideoOutputError>;
 }
 
+// ---------------------------------------------------------------------------
+// Streaming Port
+// ---------------------------------------------------------------------------
+
+/// Error type for streaming operations.
+#[derive(Debug, Error)]
+pub enum StreamingError {
+    #[error("streaming backend is unavailable: {0}")]
+    BackendUnavailable(String),
+
+    #[error("authentication with streaming backend failed: {0}")]
+    AuthenticationFailed(String),
+
+    #[error("streaming operation failed: {0}")]
+    Backend(String),
+
+    #[error("stream key is invalid: {0}")]
+    InvalidStreamKey(String),
+}
+
+/// Live stream status as reported by the streaming backend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamStatus {
+    /// Whether the stream is currently active.
+    pub active: bool,
+    /// Timecode elapsed since stream start (HH:MM:SS.mmm), if active.
+    pub timecode: Option<String>,
+    /// Current output bitrate in Kbps, if available.
+    pub kbits_per_sec: Option<u64>,
+    /// Number of dropped frames, if available.
+    pub dropped_frames: Option<u64>,
+    /// Total frames output, if available.
+    pub total_frames: Option<u64>,
+}
+
+/// Configuration needed to start or update an RTMP stream.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamConfig {
+    /// The RTMP server URL, e.g. `rtmp://live.twitch.tv/live`.
+    pub server: String,
+    /// The stream key (secret). Never logged.
+    pub stream_key: String,
+}
+
+impl StreamConfig {
+    /// Validate that neither `server` nor `stream_key` is empty.
+    pub fn new(
+        server: impl Into<String>,
+        stream_key: impl Into<String>,
+    ) -> Result<Self, StreamingError> {
+        let server = server.into();
+        let stream_key = stream_key.into();
+
+        if server.trim().is_empty() {
+            return Err(StreamingError::InvalidStreamKey(
+                "RTMP server URL cannot be empty".into(),
+            ));
+        }
+        if stream_key.trim().is_empty() {
+            return Err(StreamingError::InvalidStreamKey(
+                "stream key cannot be empty".into(),
+            ));
+        }
+
+        Ok(Self { server, stream_key })
+    }
+}
+
+/// Streaming boundary port — implemented by the OBS adapter (or test fakes).
+///
+/// Sync wrappers are used here; the OBS infrastructure adapter uses its
+/// internal Tokio runtime to fulfil these contracts.
+pub trait StreamingPort {
+    /// Query the current live stream status.
+    fn get_stream_status(&self) -> Result<StreamStatus, StreamingError>;
+
+    /// Update the RTMP service settings (server + key) and start the stream.
+    ///
+    /// If the stream is already active this is a no-op (returns `Ok(())`).
+    fn start_stream(&self, config: &StreamConfig) -> Result<(), StreamingError>;
+
+    /// Stop the active stream gracefully.
+    ///
+    /// If the stream is already stopped this is a no-op (returns `Ok(())`).
+    fn stop_stream(&self) -> Result<(), StreamingError>;
+
+    /// Update the RTMP stream key without starting/stopping the stream.
+    fn set_stream_key(&self, config: &StreamConfig) -> Result<(), StreamingError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,7 +187,6 @@ mod tests {
     #[test]
     fn frame_size_rejects_zero_dimensions() {
         assert!(FrameSize::new(0, 1280).is_none());
-
         assert!(FrameSize::new(720, 0).is_none());
     }
 
@@ -115,7 +204,6 @@ mod tests {
     #[test]
     fn output_request_preserves_composition() {
         let source_size = FrameSize::new(568, 762).unwrap();
-
         let canvas_size = FrameSize::new(720, 1280).unwrap();
 
         let request = VideoOutputRequest::new(
@@ -128,11 +216,25 @@ mod tests {
         );
 
         assert_eq!(request.scene_name, "Tango Scene");
-
         assert_eq!(request.source_name, "Tango Video");
-
         assert_eq!(request.source_size, source_size);
-
         assert_eq!(request.canvas_size, canvas_size);
+    }
+
+    #[test]
+    fn stream_config_rejects_empty_server() {
+        assert!(StreamConfig::new("", "my-key").is_err());
+    }
+
+    #[test]
+    fn stream_config_rejects_empty_key() {
+        assert!(StreamConfig::new("rtmp://live.twitch.tv/live", "").is_err());
+    }
+
+    #[test]
+    fn stream_config_accepts_valid_inputs() {
+        let cfg = StreamConfig::new("rtmp://live.twitch.tv/live", "abc123").unwrap();
+        assert_eq!(cfg.server, "rtmp://live.twitch.tv/live");
+        assert_eq!(cfg.stream_key, "abc123");
     }
 }

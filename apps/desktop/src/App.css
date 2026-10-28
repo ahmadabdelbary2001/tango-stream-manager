@@ -125,6 +125,21 @@ body {
   color: #fbbf24;
 }
 
+/* LIVE streaming badge — bright red pulse */
+.status-badge.live {
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.live .pulse-dot {
+  background-color: #ef4444;
+  box-shadow: 0 0 10px #ef4444;
+  animation: pulse 0.8s infinite alternate;
+}
+
 .pulse-dot {
   width: 8px;
   height: 8px;
@@ -157,9 +172,17 @@ body {
   gap: 1.5rem;
 }
 
+/* Streaming card spans both columns */
+.streaming-card {
+  grid-column: 1 / -1;
+}
+
 @media (max-width: 860px) {
   .dashboard-grid {
     grid-template-columns: 1fr;
+  }
+  .streaming-card {
+    grid-column: 1;
   }
 }
 
@@ -278,6 +301,51 @@ body {
   cursor: not-allowed;
 }
 
+/* Go Live button */
+.btn-live {
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  color: white;
+  padding: 0.75rem 2rem;
+  font-size: 1rem;
+  letter-spacing: 0.03em;
+}
+
+.btn-live:hover:not(:disabled) {
+  background: linear-gradient(135deg, #b91c1c, #dc2626);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(239, 68, 68, 0.4);
+}
+
+/* End Stream button */
+.btn-stop {
+  background: var(--bg-tertiary);
+  color: #fb7185;
+  border-color: rgba(244, 63, 94, 0.4);
+  padding: 0.75rem 2rem;
+  font-size: 1rem;
+}
+
+.btn-stop:hover:not(:disabled) {
+  background: rgba(244, 63, 94, 0.12);
+  border-color: rgba(244, 63, 94, 0.6);
+  box-shadow: 0 4px 12px rgba(244, 63, 94, 0.2);
+}
+
+/* Icon-only button (show/hide key) */
+.btn-icon {
+  background: var(--bg-tertiary);
+  border-color: var(--border-subtle);
+  color: var(--text-secondary);
+  padding: 0.6rem 0.75rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.btn-icon:hover {
+  background: #2a313c;
+  color: var(--text-primary);
+}
+
 /* Slider Controls */
 .slider-group {
   display: flex;
@@ -355,3 +423,68 @@ input[type="range"]::-webkit-slider-thumb:hover {
   color: #94a3b8;
   margin-top: 0.2rem;
 }
+
+/* ── Streaming Control Panel ── */
+
+/* Status bar */
+.stream-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  padding: 0.85rem 1.25rem;
+  border-radius: var(--radius-md);
+  align-items: center;
+}
+
+.stream-status-bar.live {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.stream-status-bar.offline {
+  background: rgba(48, 54, 61, 0.5);
+  border: 1px solid var(--border-subtle);
+}
+
+.stream-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.stat-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+
+.stat-value {
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.stat-value.text-live {
+  color: #f87171;
+}
+
+.stat-value.text-offline {
+  color: var(--text-muted);
+}
+
+/* RTMP settings row */
+.stream-settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+/* Start/stop action row */
+.stream-actions {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.25rem;
+}
+

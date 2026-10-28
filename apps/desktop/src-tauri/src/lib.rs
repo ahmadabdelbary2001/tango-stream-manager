@@ -1,7 +1,11 @@
 use domain::{CropRegion, MediaAssetId, VideoComposition, VideoSource, VideoTransform};
 use infrastructure::ObsVideoOutput;
-use ports::{FrameSize, VideoOutputRequest};
+use ports::{FrameSize, StreamConfig, VideoOutputRequest};
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Shared connection config
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObsConnectionConfig {
@@ -19,6 +23,10 @@ impl Default for ObsConnectionConfig {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Video composition payloads
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObsConnectionStatus {
@@ -53,17 +61,54 @@ pub struct ApplyCompositionPayload {
     pub crop: Option<CropPayload>,
 }
 
+// ---------------------------------------------------------------------------
+// Streaming payloads
+// ---------------------------------------------------------------------------
+
+/// Stream status returned to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamStatusPayload {
+    pub active: bool,
+    pub timecode: Option<String>,
+    pub kbits_per_sec: Option<u64>,
+    pub dropped_frames: Option<u64>,
+    pub total_frames: Option<u64>,
+}
+
+/// Payload used to configure and (optionally) start a stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamConfigPayload {
+    pub obs_config: ObsConnectionConfig,
+    /// RTMP server URL, e.g. `rtmp://live.twitch.tv/live`
+    pub server: String,
+    /// Stream key (secret)
+    pub stream_key: String,
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build ObsVideoOutput from connection config
+// ---------------------------------------------------------------------------
+
+fn make_output(config: &ObsConnectionConfig) -> Result<ObsVideoOutput, String> {
+    ObsVideoOutput::new(&config.host, config.port, config.password.clone())
+        .map_err(|e| format!("Failed to initialise OBS adapter: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands — connection
+// ---------------------------------------------------------------------------
+
 #[tauri::command]
 async fn test_obs_connection(config: ObsConnectionConfig) -> ObsConnectionStatus {
-    let output = match ObsVideoOutput::new(&config.host, config.port, config.password) {
-        Ok(out) => out,
+    let output = match make_output(&config) {
+        Ok(o) => o,
         Err(e) => {
             return ObsConnectionStatus {
                 connected: false,
                 obs_version: None,
                 obs_web_socket_version: None,
                 rpc_version: None,
-                error_message: Some(format!("Failed to initialize connection adapter: {e}")),
+                error_message: Some(e),
             };
         }
     };
@@ -85,6 +130,10 @@ async fn test_obs_connection(config: ObsConnectionConfig) -> ObsConnectionStatus
         },
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tauri commands — video composition
+// ---------------------------------------------------------------------------
 
 #[tauri::command]
 async fn apply_video_composition(payload: ApplyCompositionPayload) -> Result<(), String> {
@@ -123,12 +172,8 @@ async fn apply_video_composition(payload: ApplyCompositionPayload) -> Result<(),
         composition,
     );
 
-    let output = ObsVideoOutput::new(
-        &payload.obs_config.host,
-        payload.obs_config.port,
-        payload.obs_config.password,
-    )
-    .map_err(|e| format!("Failed to create OBS video output: {e}"))?;
+    let output =
+        make_output(&payload.obs_config).map_err(|e| format!("Failed to create OBS output: {e}"))?;
 
     output
         .apply_video_composition_async(&request)
@@ -136,13 +181,74 @@ async fn apply_video_composition(payload: ApplyCompositionPayload) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Tauri commands — streaming control
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn get_stream_status(obs_config: ObsConnectionConfig) -> Result<StreamStatusPayload, String> {
+    let output = make_output(&obs_config)?;
+    let status = output
+        .get_stream_status_async()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(StreamStatusPayload {
+        active: status.active,
+        timecode: status.timecode,
+        kbits_per_sec: status.kbits_per_sec,
+        dropped_frames: status.dropped_frames,
+        total_frames: status.total_frames,
+    })
+}
+
+#[tauri::command]
+async fn start_stream(payload: StreamConfigPayload) -> Result<(), String> {
+    let output = make_output(&payload.obs_config)?;
+
+    let config = StreamConfig::new(&payload.server, &payload.stream_key)
+        .map_err(|e| e.to_string())?;
+
+    output
+        .start_stream_async(&config)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn stop_stream(obs_config: ObsConnectionConfig) -> Result<(), String> {
+    let output = make_output(&obs_config)?;
+    output.stop_stream_async().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_stream_key(payload: StreamConfigPayload) -> Result<(), String> {
+    let output = make_output(&payload.obs_config)?;
+
+    let config = StreamConfig::new(&payload.server, &payload.stream_key)
+        .map_err(|e| e.to_string())?;
+
+    output
+        .set_stream_key_async(&config)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Tauri app entry point
+// ---------------------------------------------------------------------------
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             test_obs_connection,
-            apply_video_composition
+            apply_video_composition,
+            get_stream_status,
+            start_stream,
+            stop_stream,
+            set_stream_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

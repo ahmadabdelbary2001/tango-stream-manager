@@ -82,6 +82,17 @@ impl ObsVideoOutput {
         self.runtime.block_on(self.test_connection_async())
     }
 
+    /// Run an async future on the internal Tokio runtime.
+    ///
+    /// Used by sibling modules (e.g. `obs_streaming`) that share this
+    /// runtime without needing direct access to the private field.
+    pub(crate) fn block_on<F, T>(&self, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        self.runtime.block_on(future)
+    }
+
     /// Async implementation of applying video composition to OBS.
     ///
     /// It ensures:

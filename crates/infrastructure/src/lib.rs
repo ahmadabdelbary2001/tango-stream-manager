@@ -1,4 +1,5 @@
 pub mod obs_video_output;
+pub mod obs_streaming;
 
 pub use obs_video_output::{ObsVersionInfo, ObsVideoOutput};
 
