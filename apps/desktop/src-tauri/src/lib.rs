@@ -207,6 +207,18 @@ pub struct UpdateProfilePayload {
     pub adaptation: AdaptationConfig,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoDimensionsPayload {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppliedCompositionPayload {
+    pub applied_pan_x: f64,
+    pub applied_pan_y: f64,
+}
+
 // ---------------------------------------------------------------------------
 // Helper: build ObsVideoOutput from connection config
 // ---------------------------------------------------------------------------
@@ -260,6 +272,66 @@ async fn list_scenes(obs_config: ObsConnectionConfig) -> Result<Vec<String>, Str
 }
 
 // ---------------------------------------------------------------------------
+// Tauri command — detect real media dimensions through ffprobe
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn probe_video_dimensions(source_path: String) -> Result<VideoDimensionsPayload, String> {
+    let trimmed_path = source_path.trim();
+    if trimmed_path.is_empty() {
+        return Err("Enter a video file path first.".into());
+    }
+
+    let path = PathBuf::from(trimmed_path);
+    if !path.is_file() {
+        return Err("The selected video path does not point to an existing file.".into());
+    }
+
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0",
+        ])
+        .arg(&path)
+        .output()
+        .await
+        .map_err(|_| "ffprobe was not found in PATH. Install FFmpeg and make ffprobe available, or enter the source dimensions manually.".to_string())?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "ffprobe could not read video metadata from this file.".into()
+        } else {
+            format!("ffprobe could not read video metadata: {detail}")
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let dimension_line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| "No video stream was found in the selected file.".to_string())?;
+    let (width_text, height_text) = dimension_line
+        .trim()
+        .split_once('x')
+        .ok_or_else(|| "ffprobe returned an unexpected video-dimensions format.".to_string())?;
+    let width = width_text
+        .parse::<u32>()
+        .map_err(|_| "Could not parse the video width returned by ffprobe.".to_string())?;
+    let height = height_text
+        .parse::<u32>()
+        .map_err(|_| "Could not parse the video height returned by ffprobe.".to_string())?;
+
+    if width == 0 || height == 0 {
+        return Err("The video dimensions must be greater than zero.".into());
+    }
+
+    Ok(VideoDimensionsPayload { width, height })
+}
+
+// ---------------------------------------------------------------------------
 // Tauri commands — video composition & geometry
 // ---------------------------------------------------------------------------
 
@@ -305,12 +377,45 @@ fn calculate_pan_limits(
 }
 
 #[tauri::command]
-async fn apply_video_composition(payload: ApplyCompositionPayload) -> Result<(), String> {
+async fn apply_video_composition(
+    payload: ApplyCompositionPayload,
+) -> Result<AppliedCompositionPayload, String> {
     let source_size = FrameSize::new(payload.source_width, payload.source_height)
         .ok_or_else(|| "Source width and height must be greater than zero".to_string())?;
-
     let canvas_size = FrameSize::new(payload.canvas_width, payload.canvas_height)
         .ok_or_else(|| "Canvas width and height must be greater than zero".to_string())?;
+
+    let source_path = payload.source_path.trim();
+    if source_path.is_empty() {
+        return Err("Choose a video file before applying composition.".into());
+    }
+    if !PathBuf::from(source_path).is_file() {
+        return Err("The video file path does not point to an existing file.".into());
+    }
+    if !payload.pan_x.is_finite() || !payload.pan_y.is_finite() {
+        return Err("Pan X and Pan Y must be finite numbers.".into());
+    }
+
+    // Use the same integer crop rounding that OBS uses before deriving safe Pan limits.
+    let visible_size = match payload.crop.as_ref() {
+        Some(c) => video_composition::calculate_visible_source_size(
+            VcSize::new(payload.source_width as f64, payload.source_height as f64),
+            c.left,
+            c.top,
+            c.right,
+            c.bottom,
+        )
+        .map_err(|e| format!("Invalid crop region: {e}"))?,
+        None => VcSize::new(payload.source_width as f64, payload.source_height as f64),
+    };
+
+    let limits = video_composition::calculate_safe_canvas_pan_limits(
+        visible_size,
+        VcSize::new(payload.canvas_width as f64, payload.canvas_height as f64),
+        payload.zoom,
+    )
+    .map_err(|e| format!("Unable to calculate safe Pan limits: {e}"))?;
+    let safe_pan = limits.clamp(payload.pan_x, payload.pan_y);
 
     let crop = match payload.crop {
         Some(c) => Some(
@@ -327,15 +432,15 @@ async fn apply_video_composition(payload: ApplyCompositionPayload) -> Result<(),
         crop,
         transform: VideoTransform {
             zoom: payload.zoom,
-            pan_x: payload.pan_x,
-            pan_y: payload.pan_y,
+            pan_x: safe_pan.x,
+            pan_y: safe_pan.y,
         },
     };
 
     let request = VideoOutputRequest::new(
         payload.scene_name,
         payload.source_name,
-        payload.source_path,
+        source_path.to_string(),
         source_size,
         canvas_size,
         composition,
@@ -347,7 +452,12 @@ async fn apply_video_composition(payload: ApplyCompositionPayload) -> Result<(),
     output
         .apply_video_composition_async(&request)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(AppliedCompositionPayload {
+        applied_pan_x: safe_pan.x,
+        applied_pan_y: safe_pan.y,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +882,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             test_obs_connection,
             list_scenes,
+            probe_video_dimensions,
             calculate_pan_limits,
             apply_video_composition,
             get_obs_video_settings,

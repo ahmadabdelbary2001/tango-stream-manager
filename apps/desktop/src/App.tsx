@@ -4,6 +4,7 @@ import {
   listScenes,
   applyVideoComposition,
   calculatePanLimits,
+  probeVideoDimensions,
   getObsVideoSettings,
   setObsVideoSettings,
   getStreamStatus,
@@ -84,10 +85,16 @@ export default function App() {
   // ── Scene & Composition ─────────────────────────────────────────────────
   const [sceneName, setSceneName] = useState("Tango Scene");
   const [sourceName, setSourceName] = useState("Tango Video");
-  const [sourcePath, setSourcePath] = useState("E:\\smoke.mp4");
+  // Empty until a real local video is selected/entered and its dimensions are detected or entered manually.
+  const [sourcePath, setSourcePath] = useState("");
 
-  const [sourceWidth, setSourceWidth] = useState(568);
-  const [sourceHeight, setSourceHeight] = useState(762);
+  const [sourceWidth, setSourceWidth] = useState(0);
+  const [sourceHeight, setSourceHeight] = useState(0);
+  const [isDetectingSourceDimensions, setIsDetectingSourceDimensions] = useState(false);
+  const [sourceDimensionsMessage, setSourceDimensionsMessage] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
   const [canvasWidth, setCanvasWidth] = useState(720);
   const [canvasHeight, setCanvasHeight] = useState(1280);
 
@@ -103,13 +110,13 @@ export default function App() {
 
   // Computed Safe Pan Limits
   const [panLimits, setPanLimits] = useState<PanLimitsResponsePayload>({
-    min_x: -150,
-    max_x: 150,
+    min_x: 0,
+    max_x: 0,
     min_y: 0,
     max_y: 0,
-    visible_width: 568,
-    visible_height: 762,
-    x_locked: false,
+    visible_width: 0,
+    visible_height: 0,
+    x_locked: true,
     y_locked: true,
   });
 
@@ -159,6 +166,16 @@ export default function App() {
   // Recalculate Safe Pan Limits whenever geometry inputs change
   useEffect(() => {
     async function updateLimits() {
+      if (sourceWidth < 1 || sourceHeight < 1 || canvasWidth < 1 || canvasHeight < 1) {
+        setPanLimits({
+          min_x: 0, max_x: 0, min_y: 0, max_y: 0,
+          visible_width: 0, visible_height: 0,
+          x_locked: true, y_locked: true,
+        });
+        setPanX(0);
+        setPanY(0);
+        return;
+      }
       try {
         const res = await calculatePanLimits({
           source_width: sourceWidth,
@@ -343,7 +360,43 @@ export default function App() {
   }
 
   // ── Video Composition handlers ──────────────────────────────────────────
+  async function handleDetectSourceDimensions() {
+    const path = sourcePath.trim();
+    if (!path) {
+      setSourceDimensionsMessage({ success: false, message: "Enter the full path to a local video file first." });
+      return;
+    }
+
+    setIsDetectingSourceDimensions(true);
+    setSourceDimensionsMessage(null);
+    try {
+      const dimensions = await probeVideoDimensions(path);
+      setSourceWidth(dimensions.width);
+      setSourceHeight(dimensions.height);
+      setPanX(0);
+      setPanY(0);
+      setSourceDimensionsMessage({
+        success: true,
+        message: `Detected actual video size: ${dimensions.width} × ${dimensions.height}. You may still override these values manually.`,
+      });
+    } catch (err) {
+      setSourceDimensionsMessage({
+        success: false,
+        message: `${String(err)} If ffprobe is unavailable, enter the video dimensions manually.`,
+      });
+    } finally {
+      setIsDetectingSourceDimensions(false);
+    }
+  }
+
   async function handleApplyComposition() {
+    if (!sourcePath.trim() || sourceWidth < 1 || sourceHeight < 1) {
+      setApplyResult({
+        success: false,
+        message: "Enter a real video file path and detect or enter valid source dimensions before applying composition.",
+      });
+      return;
+    }
     setIsApplyingComposition(true);
     setApplyResult(null);
 
@@ -365,10 +418,12 @@ export default function App() {
     };
 
     try {
-      await applyVideoComposition(payload);
+      const applied = await applyVideoComposition(payload);
+      setPanX(applied.applied_pan_x);
+      setPanY(applied.applied_pan_y);
       setApplyResult({
         success: true,
-        message: `Composition applied to scene "${sceneName}"!`,
+        message: `Composition applied to scene "${sceneName}" with safe Pan limits enforced by Rust.`,
       });
     } catch (err) {
       setApplyResult({ success: false, message: String(err) });
@@ -721,9 +776,31 @@ export default function App() {
             <input
               className="form-input font-mono"
               value={sourcePath}
-              onChange={(e) => setSourcePath(e.target.value)}
-              placeholder="E:\videos\stream.mp4"
+              onChange={(e) => {
+                setSourcePath(e.target.value);
+                setSourceWidth(0);
+                setSourceHeight(0);
+                setPanX(0);
+                setPanY(0);
+                setSourceDimensionsMessage(null);
+              }}
+              placeholder="Full path, e.g. C:/Videos/stream.mp4"
             />
+            <div className="input-row" style={{ alignItems: "center" }}>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={handleDetectSourceDimensions}
+                disabled={isDetectingSourceDimensions || !sourcePath.trim()}
+              >
+                {isDetectingSourceDimensions ? "Detecting dimensions…" : "Detect Actual Dimensions (ffprobe)"}
+              </button>
+              <span className="form-label">You can also enter Width and Height manually below.</span>
+            </div>
+            {sourceDimensionsMessage && (
+              <div className={`alert-box ${sourceDimensionsMessage.success ? "alert-success" : "alert-error"}`}>
+                <span>{sourceDimensionsMessage.message}</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -743,14 +820,20 @@ export default function App() {
                 <input
                   className="form-input font-mono"
                   type="number"
-                  value={sourceWidth}
-                  onChange={(e) => setSourceWidth(Math.max(1, Number(e.target.value)))}
+                  min="1"
+                  aria-label="Source video width in pixels"
+                  value={sourceWidth || ""}
+                  placeholder="Width"
+                  onChange={(e) => setSourceWidth(e.target.value === "" ? 0 : Math.max(1, Number(e.target.value)))}
                 />
                 <input
                   className="form-input font-mono"
                   type="number"
-                  value={sourceHeight}
-                  onChange={(e) => setSourceHeight(Math.max(1, Number(e.target.value)))}
+                  min="1"
+                  aria-label="Source video height in pixels"
+                  value={sourceHeight || ""}
+                  placeholder="Height"
+                  onChange={(e) => setSourceHeight(e.target.value === "" ? 0 : Math.max(1, Number(e.target.value)))}
                 />
               </div>
             </div>

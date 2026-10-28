@@ -64,6 +64,16 @@ export interface PanLimitsResponsePayload {
   y_locked: boolean;
 }
 
+export interface VideoDimensionsPayload {
+  width: number;
+  height: number;
+}
+
+export interface AppliedCompositionPayload {
+  applied_pan_x: number;
+  applied_pan_y: number;
+}
+
 // ---------------------------------------------------------------------------
 // Video Settings types (OBS base and output canvas)
 // ---------------------------------------------------------------------------
@@ -199,10 +209,16 @@ export async function calculatePanLimits(
   return invoke<PanLimitsResponsePayload>("calculate_pan_limits", { payload });
 }
 
+export async function probeVideoDimensions(
+  sourcePath: string
+): Promise<VideoDimensionsPayload> {
+  return invoke<VideoDimensionsPayload>("probe_video_dimensions", { sourcePath });
+}
+
 export async function applyVideoComposition(
   payload: ApplyCompositionPayload
-): Promise<void> {
-  return invoke<void>("apply_video_composition", { payload });
+): Promise<AppliedCompositionPayload> {
+  return invoke<AppliedCompositionPayload>("apply_video_composition", { payload });
 }
 
 // ---------------------------------------------------------------------------
