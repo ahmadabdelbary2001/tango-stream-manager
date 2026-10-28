@@ -1,6 +1,7 @@
 use domain::QualitySettings;
 use obws::common::MonitorType;
 use obws::requests::config::SetVideoSettings;
+use obws::requests::inputs::InputId;
 use obws::requests::profiles::SetParameter;
 use ports::{
     ExtendedStreamStatus, ObsVideoSettings, StreamConfig, StreamStatus, StreamingError,
@@ -362,17 +363,21 @@ impl ObsVideoOutput {
 
         let current = client
             .inputs()
-            .audio_monitor_type(source_name)
+            .audio_monitor_type(InputId::Name(source_name))
             .await
             .map_err(|error| StreamingError::Backend(format!(
                 "Could not read the OBS audio-monitoring type for input '{source_name}': {error}"
             )))?;
         let current_text = Self::monitor_type_to_api(&current)?.to_string();
-        let input_muted = client.inputs().muted(source_name).await.map_err(|error| {
-            StreamingError::Backend(format!(
-                "Could not read the mute state for OBS input '{source_name}': {error}"
-            ))
-        })?;
+        let input_muted = client
+            .inputs()
+            .muted(InputId::Name(source_name))
+            .await
+            .map_err(|error| {
+                StreamingError::Backend(format!(
+                    "Could not read the mute state for OBS input '{source_name}': {error}"
+                ))
+            })?;
 
         let (target_type, saved_restore_type) = if enabled {
             (MonitorType::None, Some(current_text))
@@ -385,24 +390,28 @@ impl ObsVideoOutput {
 
         if let Err(error) = client
             .inputs()
-            .set_audio_monitor_type(source_name, target_type.clone())
+            .set_audio_monitor_type(InputId::Name(source_name), target_type.clone())
             .await
         {
             let _ = client
                 .inputs()
-                .set_audio_monitor_type(source_name, current.clone())
+                .set_audio_monitor_type(InputId::Name(source_name), current.clone())
                 .await;
             return Err(StreamingError::Backend(format!(
                 "Could not set OBS audio monitoring for '{source_name}'; restoration of the prior value was attempted: {error}"
             )));
         }
 
-        let actual = match client.inputs().audio_monitor_type(source_name).await {
+        let actual = match client
+            .inputs()
+            .audio_monitor_type(InputId::Name(source_name))
+            .await
+        {
             Ok(value) => value,
             Err(error) => {
                 let _ = client
                     .inputs()
-                    .set_audio_monitor_type(source_name, current.clone())
+                    .set_audio_monitor_type(InputId::Name(source_name), current.clone())
                     .await;
                 return Err(StreamingError::Backend(format!(
                     "OBS accepted the monitoring change for '{source_name}', but verification failed; restoration was attempted: {error}"
@@ -414,7 +423,7 @@ impl ObsVideoOutput {
         if actual_text != expected_text {
             let _ = client
                 .inputs()
-                .set_audio_monitor_type(source_name, current.clone())
+                .set_audio_monitor_type(InputId::Name(source_name), current.clone())
                 .await;
             return Err(StreamingError::Backend(format!(
                 "OBS did not confirm the requested audio monitoring mode for '{source_name}'. The previous setting was restored where possible."
