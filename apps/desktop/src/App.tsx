@@ -9,6 +9,7 @@ import {
   applyObsQualitySettings,
   getObsStreamingOutputSettings,
   applyObsStreamingOutputSettings,
+  setObsLocalSilentMode,
   getStreamStatus,
   startProfileStream,
   stopStream,
@@ -118,6 +119,11 @@ export default function App() {
   });
 
   const [isApplyingComposition, setIsApplyingComposition] = useState(false);
+  const [isApplyingSilentMode, setIsApplyingSilentMode] = useState(false);
+  const [silentModeMessage, setSilentModeMessage] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
   const [applyResult, setApplyResult] = useState<{
     success: boolean;
     message: string;
@@ -591,6 +597,124 @@ export default function App() {
     }
   }
 
+  async function handleSilentModeToggle(enabled: boolean) {
+    const profile = activeProfile;
+    if (!profile || isApplyingSilentMode) return;
+    if (!connectionStatus.connected) {
+      setSilentModeMessage({ success: false, message: "Connect to OBS before changing local silent mode." });
+      return;
+    }
+
+    const savedComposition = profile.composition;
+    if (enabled && savedComposition.silent_mode_enabled) {
+      const alreadySilenced = savedComposition.silent_mode_source_name.trim();
+      const requestedSource = sourceName.trim();
+      setSilentModeMessage({
+        success: false,
+        message: alreadySilenced === requestedSource
+          ? `Silent Mode is already active for "${alreadySilenced}".`
+          : `Silent Mode is still active for "${alreadySilenced}". Turn it off first to restore that source, then enable it for "${requestedSource}".`,
+      });
+      return;
+    }
+    if (!enabled && !savedComposition.silent_mode_enabled) return;
+
+    const targetSource = enabled
+      ? sourceName.trim()
+      : (savedComposition.silent_mode_source_name.trim() || sourceName.trim());
+    if (!targetSource) {
+      setSilentModeMessage({ success: false, message: "Enter the OBS Source Name before enabling Silent Mode." });
+      return;
+    }
+
+    setIsApplyingSilentMode(true);
+    setSilentModeMessage(null);
+    try {
+      if (enabled) {
+        const applied = await setObsLocalSilentMode(obsConfig, {
+          source_name: targetSource,
+          enabled: true,
+          restore_monitor_type: null,
+        });
+        const restoreType = applied.restore_monitor_type || "OBS_MONITORING_TYPE_NONE";
+        const updated: ProfileSummaryDto = {
+          ...profile,
+          composition: {
+            ...profile.composition,
+            silent_mode_enabled: true,
+            silent_mode_source_name: targetSource,
+            silent_mode_restore_monitor_type: restoreType,
+          },
+        };
+        let saved: ProfileSummaryDto;
+        try {
+          saved = await updateProfile(updated);
+        } catch (persistError) {
+          let rollbackDetail = "";
+          try {
+            await setObsLocalSilentMode(obsConfig, {
+              source_name: targetSource,
+              enabled: false,
+              restore_monitor_type: restoreType,
+            });
+          } catch (rollbackError) {
+            rollbackDetail = ` OBS rollback also failed: ${String(rollbackError)}`;
+          }
+          throw new Error(`OBS monitoring changed, but saving the profile failed: ${String(persistError)}.${rollbackDetail}`);
+        }
+        setActiveProfileState(saved);
+        setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
+        setSilentModeMessage({
+          success: true,
+          message: applied.input_muted
+            ? `Local OBS monitoring is off for "${targetSource}". This OBS input is muted, and Silent Mode did not change its mute state, so viewers will not hear it until you unmute it in OBS.`
+            : `Local OBS monitoring is off for "${targetSource}". The OBS input was not muted or unmuted, so its audio remains available to the stream mix. Desktop/system audio and other OBS sources are not changed.`,
+        });
+      } else {
+        const restoreType = savedComposition.silent_mode_restore_monitor_type || "OBS_MONITORING_TYPE_NONE";
+        const applied = await setObsLocalSilentMode(obsConfig, {
+          source_name: targetSource,
+          enabled: false,
+          restore_monitor_type: restoreType,
+        });
+        const updated: ProfileSummaryDto = {
+          ...profile,
+          composition: {
+            ...profile.composition,
+            silent_mode_enabled: false,
+            silent_mode_source_name: "",
+            silent_mode_restore_monitor_type: "OBS_MONITORING_TYPE_NONE",
+          },
+        };
+        let saved: ProfileSummaryDto;
+        try {
+          saved = await updateProfile(updated);
+        } catch (persistError) {
+          let rollbackDetail = "";
+          try {
+            await setObsLocalSilentMode(obsConfig, {
+              source_name: targetSource,
+              enabled: true,
+              restore_monitor_type: null,
+            });
+          } catch (rollbackError) {
+            rollbackDetail = ` OBS rollback also failed: ${String(rollbackError)}`;
+          }
+          throw new Error(`OBS monitoring was restored, but saving the profile failed: ${String(persistError)}.${rollbackDetail}`);
+        }
+        setActiveProfileState(saved);
+        setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
+        setSilentModeMessage({
+          success: true,
+          message: `Silent Mode is off for "${targetSource}". Its previous OBS audio monitoring mode was restored (${applied.current_monitor_type}).`,
+        });
+      }
+    } catch (error) {
+      setSilentModeMessage({ success: false, message: String(error) });
+    } finally {
+      setIsApplyingSilentMode(false);
+    }
+  }
   function handleResetComposition() {
     // Reset canvas and transform/crop controls only. Preserve the selected scene,
     // source name/path, and actual source dimensions detected from the media file.
@@ -1255,6 +1379,35 @@ export default function App() {
             </div>
           </div>
 
+          <div className="form-group" style={{ marginTop: "0.25rem" }}>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: "0.6rem", cursor: connectionStatus.connected && !isApplyingSilentMode ? "pointer" : "not-allowed" }}>
+              <input
+                type="checkbox"
+                checked={activeProfile?.composition.silent_mode_enabled ?? false}
+                onChange={(e) => handleSilentModeToggle(e.target.checked)}
+                disabled={!activeProfile || !connectionStatus.connected || isApplyingSilentMode}
+                style={{ width: "16px", height: "16px", marginTop: "0.2rem" }}
+              />
+              <span>
+                <strong className="form-label" style={{ color: "var(--text-primary)" }}>
+                  Silent Mode — mute local monitoring, keep stream audio
+                </strong>
+                <span className="form-label" style={{ display: "block" }}>
+                  Turns this OBS input's Audio Monitoring to Off (NONE). It does not mute the OBS input, and it remembers the previous monitoring type so it can be restored when switched off.
+                </span>
+                {activeProfile?.composition.silent_mode_enabled && activeProfile.composition.silent_mode_source_name && (
+                  <span className="form-label" style={{ display: "block" }}>
+                    Silent Mode is currently attached to: {activeProfile.composition.silent_mode_source_name}
+                  </span>
+                )}
+              </span>
+            </label>
+            {silentModeMessage && (
+              <div className={`alert-box ${silentModeMessage.success ? "alert-success" : "alert-error"}`} style={{ marginTop: "0.5rem" }}>
+                <span>{silentModeMessage.message}</span>
+              </div>
+            )}
+          </div>
           <div className="form-group">
             <label className="form-label">Local Video File Path</label>
             <input

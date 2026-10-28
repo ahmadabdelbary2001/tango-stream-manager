@@ -163,6 +163,22 @@ pub struct ObsStreamingOutputSettingsPayload {
     pub dynamic_bitrate_enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObsLocalSilentModePayload {
+    pub source_name: String,
+    pub enabled: bool,
+    pub restore_monitor_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObsLocalSilentModeResultPayload {
+    pub source_name: String,
+    pub silent_mode_enabled: bool,
+    pub current_monitor_type: String,
+    pub restore_monitor_type: Option<String>,
+    pub input_muted: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Streaming & Health Payloads
 // ---------------------------------------------------------------------------
@@ -708,6 +724,28 @@ async fn apply_obs_streaming_output_options(
     })
 }
 #[tauri::command]
+async fn set_obs_local_silent_mode(
+    obs_config: ObsConnectionConfig,
+    payload: ObsLocalSilentModePayload,
+) -> Result<ObsLocalSilentModeResultPayload, String> {
+    let output = make_output(&obs_config)?;
+    let result = output
+        .set_local_silent_mode_async(
+            &payload.source_name,
+            payload.enabled,
+            payload.restore_monitor_type.as_deref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(ObsLocalSilentModeResultPayload {
+        source_name: result.source_name,
+        silent_mode_enabled: result.silent_mode_enabled,
+        current_monitor_type: result.current_monitor_type,
+        restore_monitor_type: result.restore_monitor_type,
+        input_muted: result.input_muted,
+    })
+}
+#[tauri::command]
 async fn get_stream_status(obs_config: ObsConnectionConfig) -> Result<StreamStatusPayload, String> {
     let output = make_output(&obs_config)?;
     let status = output
@@ -1155,6 +1193,7 @@ pub fn run() {
             apply_obs_quality_settings,
             get_obs_streaming_output_settings,
             apply_obs_streaming_output_options,
+            set_obs_local_silent_mode,
             get_stream_status,
             start_stream,
             start_profile_stream,

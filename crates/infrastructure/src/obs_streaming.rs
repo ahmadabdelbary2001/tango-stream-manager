@@ -1,4 +1,5 @@
 use domain::QualitySettings;
+use obws::common::MonitorType;
 use obws::requests::config::SetVideoSettings;
 use obws::requests::profiles::SetParameter;
 use ports::{
@@ -26,6 +27,17 @@ pub struct ObsStreamingOutputOptions {
     pub rescale_filter: String,
     pub dynamic_bitrate_enabled: bool,
 }
+
+/// Result of changing an input's local OBS audio-monitoring route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObsLocalSilentModeResult {
+    pub source_name: String,
+    pub silent_mode_enabled: bool,
+    pub current_monitor_type: String,
+    pub restore_monitor_type: Option<String>,
+    pub input_muted: bool,
+}
+
 impl ObsVideoOutput {
     // ------------------------------------------------------------------
     // Async streaming helpers (called by Tauri commands directly)
@@ -293,6 +305,129 @@ impl ObsVideoOutput {
         }
 
         Ok(actual)
+    }
+    fn monitor_type_to_api(value: &MonitorType) -> Result<&'static str, StreamingError> {
+        match value {
+            MonitorType::None => Ok("OBS_MONITORING_TYPE_NONE"),
+            MonitorType::MonitorOnly => Ok("OBS_MONITORING_TYPE_MONITOR_ONLY"),
+            MonitorType::MonitorAndOutput => Ok("OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT"),
+            _ => Err(StreamingError::Backend(
+                "OBS returned an unsupported audio monitoring type; refusing to change it.".into(),
+            )),
+        }
+    }
+
+    fn parse_monitor_type(value: &str) -> Result<MonitorType, StreamingError> {
+        match value.trim() {
+            "OBS_MONITORING_TYPE_NONE" => Ok(MonitorType::None),
+            "OBS_MONITORING_TYPE_MONITOR_ONLY" => Ok(MonitorType::MonitorOnly),
+            "OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT" => Ok(MonitorType::MonitorAndOutput),
+            other => Err(StreamingError::Backend(format!(
+                "Unsupported saved OBS audio monitoring type '{other}'. The saved setting was not applied."
+            ))),
+        }
+    }
+
+    /// Disable only local OBS monitoring for one input. This deliberately leaves
+    /// the input's mute state untouched so its audio can remain in the stream mix.
+    /// The previous monitor type is returned and must be supplied when disabling
+    /// silent mode to restore the user's prior OBS monitoring configuration.
+    pub async fn set_local_silent_mode_async(
+        &self,
+        source_name: &str,
+        enabled: bool,
+        restore_monitor_type: Option<&str>,
+    ) -> Result<ObsLocalSilentModeResult, StreamingError> {
+        let source_name = source_name.trim();
+        if source_name.is_empty() {
+            return Err(StreamingError::Backend(
+                "Enter the OBS Source Name before changing local silent mode.".into(),
+            ));
+        }
+
+        let restore_target = if enabled {
+            None
+        } else {
+            Some(Self::parse_monitor_type(restore_monitor_type.ok_or_else(|| {
+                StreamingError::Backend(
+                    "The previous OBS monitor type is missing; refusing to guess a restoration value.".into(),
+                )
+            })?)?)
+        };
+
+        let client = self
+            .connect_client()
+            .await
+            .map_err(|error| StreamingError::BackendUnavailable(error.to_string()))?;
+
+        let current = client
+            .inputs()
+            .audio_monitor_type(source_name)
+            .await
+            .map_err(|error| StreamingError::Backend(format!(
+                "Could not read the OBS audio-monitoring type for input '{source_name}': {error}"
+            )))?;
+        let current_text = Self::monitor_type_to_api(&current)?.to_string();
+        let input_muted = client.inputs().muted(source_name).await.map_err(|error| {
+            StreamingError::Backend(format!(
+                "Could not read the mute state for OBS input '{source_name}': {error}"
+            ))
+        })?;
+
+        let (target_type, saved_restore_type) = if enabled {
+            (MonitorType::None, Some(current_text))
+        } else {
+            (
+                restore_target.expect("restore target is present when disabling"),
+                None,
+            )
+        };
+
+        if let Err(error) = client
+            .inputs()
+            .set_audio_monitor_type(source_name, target_type.clone())
+            .await
+        {
+            let _ = client
+                .inputs()
+                .set_audio_monitor_type(source_name, current.clone())
+                .await;
+            return Err(StreamingError::Backend(format!(
+                "Could not set OBS audio monitoring for '{source_name}'; restoration of the prior value was attempted: {error}"
+            )));
+        }
+
+        let actual = match client.inputs().audio_monitor_type(source_name).await {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = client
+                    .inputs()
+                    .set_audio_monitor_type(source_name, current.clone())
+                    .await;
+                return Err(StreamingError::Backend(format!(
+                    "OBS accepted the monitoring change for '{source_name}', but verification failed; restoration was attempted: {error}"
+                )));
+            }
+        };
+        let actual_text = Self::monitor_type_to_api(&actual)?.to_string();
+        let expected_text = Self::monitor_type_to_api(&target_type)?;
+        if actual_text != expected_text {
+            let _ = client
+                .inputs()
+                .set_audio_monitor_type(source_name, current.clone())
+                .await;
+            return Err(StreamingError::Backend(format!(
+                "OBS did not confirm the requested audio monitoring mode for '{source_name}'. The previous setting was restored where possible."
+            )));
+        }
+
+        Ok(ObsLocalSilentModeResult {
+            source_name: source_name.to_string(),
+            silent_mode_enabled: enabled,
+            current_monitor_type: actual_text,
+            restore_monitor_type: saved_restore_type,
+            input_muted,
+        })
     }
     pub async fn get_stream_status_async(&self) -> Result<StreamStatus, StreamingError> {
         let client = self

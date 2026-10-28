@@ -185,6 +185,12 @@ pub struct ProfileCompositionConfig {
     pub pan_y: f64,
     pub has_crop: bool,
     pub crop: Option<ProfileCropConfig>,
+    /// Whether local OBS audio monitoring is disabled for the saved source.
+    pub silent_mode_enabled: bool,
+    /// OBS input whose previous monitor type is saved while silent mode is active.
+    pub silent_mode_source_name: String,
+    /// OBS monitor type to restore when silent mode is disabled.
+    pub silent_mode_restore_monitor_type: String,
 }
 
 impl Default for ProfileCompositionConfig {
@@ -207,6 +213,9 @@ impl Default for ProfileCompositionConfig {
                 right: 0.1,
                 bottom: 0.1,
             }),
+            silent_mode_enabled: false,
+            silent_mode_source_name: String::new(),
+            silent_mode_restore_monitor_type: "OBS_MONITORING_TYPE_NONE".into(),
         }
     }
 }

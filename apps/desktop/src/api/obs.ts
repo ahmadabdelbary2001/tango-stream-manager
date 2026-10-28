@@ -109,6 +109,20 @@ export interface ObsStreamingOutputSettingsPayload extends ObsStreamingOutputOpt
   output_mode: string;
 }
 
+export interface ObsLocalSilentModePayload {
+  source_name: string;
+  enabled: boolean;
+  restore_monitor_type: string | null;
+}
+
+export interface ObsLocalSilentModeResultPayload {
+  source_name: string;
+  silent_mode_enabled: boolean;
+  current_monitor_type: string;
+  restore_monitor_type: string | null;
+  input_muted: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Streaming & Health types
 // ---------------------------------------------------------------------------
@@ -182,6 +196,9 @@ export interface ProfileCompositionConfig {
   pan_y: number;
   has_crop: boolean;
   crop: CropPayload | null;
+  silent_mode_enabled: boolean;
+  silent_mode_source_name: string;
+  silent_mode_restore_monitor_type: string;
 }
 
 export interface AdaptationConfig {
@@ -306,6 +323,16 @@ export async function applyObsStreamingOutputSettings(
   return invoke<ObsStreamingOutputSettingsPayload>("apply_obs_streaming_output_options", {
     obsConfig,
     settings,
+  });
+}
+
+export async function setObsLocalSilentMode(
+  obsConfig: ObsConnectionConfig,
+  payload: ObsLocalSilentModePayload
+): Promise<ObsLocalSilentModeResultPayload> {
+  return invoke<ObsLocalSilentModeResultPayload>("set_obs_local_silent_mode", {
+    obsConfig,
+    payload,
   });
 }
 // ---------------------------------------------------------------------------
