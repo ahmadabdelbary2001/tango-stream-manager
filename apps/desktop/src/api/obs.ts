@@ -97,6 +97,18 @@ export interface AppliedObsQualitySettingsPayload {
   keyframe_interval_sec: number;
 }
 
+export interface ObsStreamingOutputOptionsPayload {
+  rescale_output_enabled: boolean;
+  rescale_output_width: number;
+  rescale_output_height: number;
+  rescale_filter: string;
+  dynamic_bitrate_enabled: boolean;
+}
+
+export interface ObsStreamingOutputSettingsPayload extends ObsStreamingOutputOptionsPayload {
+  output_mode: string;
+}
+
 // ---------------------------------------------------------------------------
 // Streaming & Health types
 // ---------------------------------------------------------------------------
@@ -145,6 +157,11 @@ export interface QualitySettings {
   encoder: string;
   rate_control: string;
   keyframe_interval_sec: number;
+  rescale_output_enabled: boolean;
+  rescale_output_width: number;
+  rescale_output_height: number;
+  rescale_filter: string;
+  dynamic_bitrate_enabled: boolean;
 }
 
 export interface ProfileObsConnection {
@@ -273,6 +290,22 @@ export async function applyObsQualitySettings(
     obsConfig,
     settings,
     quality,
+  });
+}
+
+export async function getObsStreamingOutputSettings(
+  obsConfig: ObsConnectionConfig
+): Promise<ObsStreamingOutputSettingsPayload> {
+  return invoke<ObsStreamingOutputSettingsPayload>("get_obs_streaming_output_settings", { obsConfig });
+}
+
+export async function applyObsStreamingOutputSettings(
+  obsConfig: ObsConnectionConfig,
+  settings: ObsStreamingOutputOptionsPayload
+): Promise<ObsStreamingOutputSettingsPayload> {
+  return invoke<ObsStreamingOutputSettingsPayload>("apply_obs_streaming_output_options", {
+    obsConfig,
+    settings,
   });
 }
 // ---------------------------------------------------------------------------

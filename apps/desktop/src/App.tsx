@@ -7,6 +7,8 @@ import {
   probeVideoDimensions,
   getObsVideoSettings,
   applyObsQualitySettings,
+  getObsStreamingOutputSettings,
+  applyObsStreamingOutputSettings,
   getStreamStatus,
   startProfileStream,
   stopStream,
@@ -123,6 +125,13 @@ export default function App() {
 
   // ── Quality Settings & Staging ──────────────────────────────────────────
   const [isApplyingQuality, setIsApplyingQuality] = useState(false);
+  const [isResettingQuality, setIsResettingQuality] = useState(false);
+  const [isApplyingOutputOptions, setIsApplyingOutputOptions] = useState(false);
+  const [obsOutputMode, setObsOutputMode] = useState<string | null>(null);
+  const [outputOptionsMessage, setOutputOptionsMessage] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
   const [qualityMessage, setQualityMessage] = useState<{
     success: boolean;
     message: string;
@@ -485,6 +494,13 @@ export default function App() {
           setAvailableScenes(scenes);
           const vs = await getObsVideoSettings(config);
           setObsVideoSettingsState(vs);
+          try {
+            const outputOptions = await getObsStreamingOutputSettings(config);
+            setObsOutputMode(outputOptions.output_mode);
+          } catch (outputOptionsError) {
+            setObsOutputMode(null);
+            console.warn("Could not read current OBS output mode:", outputOptionsError);
+          }
         } catch {
           // ignore
         }
@@ -576,10 +592,19 @@ export default function App() {
   }
 
   function handleResetComposition() {
+    // Reset canvas and transform/crop controls only. Preserve the selected scene,
+    // source name/path, and actual source dimensions detected from the media file.
+    setCanvasWidth(720);
+    setCanvasHeight(1280);
     setZoom(1.0);
     setPanX(0);
     setPanY(0);
     setHasCrop(false);
+    setCropLeft(0.1);
+    setCropTop(0.1);
+    setCropRight(0.1);
+    setCropBottom(0.1);
+    setApplyResult(null);
   }
   // Auto-save the selected profile's stream key to its isolated OS credential entry.
   useEffect(() => {
@@ -736,6 +761,48 @@ export default function App() {
     updateProfile(updatedProfile).catch(console.error);
   }
 
+  async function handleResetQualitySettings() {
+    if (!activeProfile) return;
+    if (isStreaming) {
+      setQualityMessage({ success: false, message: "Stop the stream before resetting this profile's quality settings." });
+      return;
+    }
+
+    const resetProfile: ProfileSummaryDto = {
+      ...activeProfile,
+      quality: {
+        output_width: 720,
+        output_height: 1280,
+        fps: 30,
+        video_bitrate_kbps: 2500,
+        audio_bitrate_kbps: 128,
+        encoder: "obs_x264",
+        rate_control: "CBR",
+        keyframe_interval_sec: 2,
+        rescale_output_enabled: false,
+        rescale_output_width: 720,
+        rescale_output_height: 1280,
+        rescale_filter: "lanczos",
+        dynamic_bitrate_enabled: false,
+      },
+    };
+
+    setIsResettingQuality(true);
+    setQualityMessage(null);
+    try {
+      const saved = await updateProfile(resetProfile);
+      setActiveProfileState(saved);
+      setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
+      setQualityMessage({
+        success: true,
+        message: `Quality settings for "${saved.name}" were reset to Standard Balanced and saved to this profile. Press Apply Quality Settings to OBS to apply them.`,
+      });
+    } catch (err) {
+      setQualityMessage({ success: false, message: `Could not reset quality settings: ${String(err)}` });
+    } finally {
+      setIsResettingQuality(false);
+    }
+  }
   async function handleApplyVideoSettingsToObs() {
     if (!activeProfile) return;
     if (streamStatus?.active) {
@@ -775,6 +842,64 @@ export default function App() {
     }
   }
 
+  function handleProfileQualityPatch(patch: Partial<ProfileSummaryDto["quality"]>) {
+    if (!activeProfile || isStreaming || isApplyingQuality || isResettingQuality || isApplyingOutputOptions) return;
+    const updated: ProfileSummaryDto = {
+      ...activeProfile,
+      quality: { ...activeProfile.quality, ...patch },
+    };
+    setActiveProfileState(updated);
+    setProfiles((current) => current.map((item) => item.id === updated.id ? updated : item));
+    setOutputOptionsMessage(null);
+    updateProfile(updated).then((saved) => {
+      // Avoid allowing an older async save response to overwrite a newer edit.
+      setProfiles((current) => current.map((item) =>
+        item.id === saved.id && JSON.stringify(item.quality) === JSON.stringify(updated.quality) ? saved : item
+      ));
+      setActiveProfileState((current) =>
+        current?.id === saved.id && JSON.stringify(current.quality) === JSON.stringify(updated.quality) ? saved : current
+      );
+    }).catch((error) => {
+      setOutputOptionsMessage({ success: false, message: `Could not save this profile's output settings: ${String(error)}` });
+    });
+  }
+
+  async function handleApplyOutputOptionsToObs() {
+    if (!activeProfile) return;
+    if (isStreaming) {
+      setOutputOptionsMessage({ success: false, message: "Stop the live stream before applying these OBS output/network settings." });
+      return;
+    }
+
+    setIsApplyingOutputOptions(true);
+    setOutputOptionsMessage(null);
+    try {
+      const quality = activeProfile.quality;
+      const applied = await applyObsStreamingOutputSettings(obsConfig, {
+        rescale_output_enabled: quality.rescale_output_enabled,
+        rescale_output_width: quality.rescale_output_width,
+        rescale_output_height: quality.rescale_output_height,
+        rescale_filter: quality.rescale_filter,
+        dynamic_bitrate_enabled: quality.dynamic_bitrate_enabled,
+      });
+      setObsOutputMode(applied.output_mode);
+      if (applied.output_mode === "Advanced") {
+        setOutputOptionsMessage({
+          success: true,
+          message: `OBS settings read back successfully. Output Mode: Advanced. Streaming Rescale: ${applied.rescale_output_enabled ? `${applied.rescale_output_width}×${applied.rescale_output_height}, ${applied.rescale_filter}` : "Disabled"}. Dynamic Bitrate: ${applied.dynamic_bitrate_enabled ? "Enabled" : "Disabled"}. Rescale applies to the next stream start.`,
+        });
+      } else {
+        setOutputOptionsMessage({
+          success: true,
+          message: `OBS setting verified. Output Mode: ${applied.output_mode}. Dynamic Bitrate: ${applied.dynamic_bitrate_enabled ? "Enabled" : "Disabled"}. Rescale Output is only used in Advanced Output mode and was not changed.`,
+        });
+      }
+    } catch (error) {
+      setOutputOptionsMessage({ success: false, message: String(error) });
+    } finally {
+      setIsApplyingOutputOptions(false);
+    }
+  }
   // ── Streaming handlers ──────────────────────────────────────────────────
   async function pollStreamStatus() {
     try {
@@ -1166,7 +1291,7 @@ export default function App() {
           <div className="card-title">
             <span>Video Composition &amp; Geometry</span>
             <button className="btn btn-secondary btn-sm" onClick={handleResetComposition}>
-              Reset to 1.0x Cover
+              Reset Composition Settings
             </button>
           </div>
 
@@ -1461,6 +1586,7 @@ export default function App() {
                   setActiveProfileState(updated);
                   updateProfile(updated).catch(console.error);
                 }}
+                disabled={isStreaming || isResettingQuality || isApplyingQuality}
               />
             </div>
           </div>
@@ -1479,8 +1605,10 @@ export default function App() {
                     quality: { ...activeProfile.quality, audio_bitrate_kbps: v },
                   };
                   setActiveProfileState(updated);
+                  setProfiles((current) => current.map((item) => item.id === updated.id ? updated : item));
                   updateProfile(updated).catch(console.error);
                 }}
+                disabled={isStreaming || !activeProfile}
               >
                 <option value={160}>160 Kbps (High)</option>
                 <option value={128}>128 Kbps (Balanced)</option>
@@ -1490,39 +1618,102 @@ export default function App() {
             </div>
 
             <div className="form-group">
-              <label className="form-label">Rate Control &amp; Keyframe</label>
-              <div style={{ display: "flex", gap: "0.5rem" }}>
-                <input
-                  className="form-input font-mono"
-                  value="CBR"
-                  readOnly
-                  title="CBR rate control is recommended for stable RTMP streaming"
-                  style={{ width: "80px" }}
-                />
-                <input
-                  className="form-input font-mono"
-                  value="2s Keyframe"
-                  readOnly
-                  style={{ flex: 1 }}
-                />
-              </div>
+              <label className="form-label">Video Encoder</label>
+              <select
+                className="form-input font-mono"
+                value={activeProfile?.quality.encoder ?? "obs_x264"}
+                onChange={(e) => {
+                  if (!activeProfile) return;
+                  const updated = {
+                    ...activeProfile,
+                    quality: { ...activeProfile.quality, encoder: e.target.value },
+                  };
+                  setActiveProfileState(updated);
+                  setProfiles((current) => current.map((item) => item.id === updated.id ? updated : item));
+                  updateProfile(updated).catch(console.error);
+                }}
+                disabled={isStreaming || !activeProfile}
+              >
+                <option value="auto">Auto — keep current OBS encoder</option>
+                <option value="obs_x264">Software x264</option>
+                <option value="jim_nvenc">NVIDIA NVENC H.264</option>
+                <option value="jim_qsv">Intel Quick Sync H.264</option>
+                <option value="amd_h264">AMD H.264</option>
+                <option value="apple_h264">Apple VideoToolbox H.264</option>
+              </select>
+              <span className="form-label">Availability depends on the OBS build and installed hardware encoders.</span>
             </div>
 
-            <div className="form-group" style={{ justifyContent: "flex-end" }}>
-              <button
-                className="btn btn-secondary"
-                onClick={handleApplyVideoSettingsToObs}
-                disabled={!connectionStatus.connected || isStreaming || isApplyingQuality}
-                title={
-                  isStreaming
-                    ? "OBS requires stopping the live stream to change output resolution."
-                    : "Apply video and encoder quality settings in OBS Simple Output mode"
-                }
-              >
-                {isApplyingQuality ? "Applying…" : "Apply Quality Settings to OBS"}
-              </button>
+            <div className="form-group">
+              <label className="form-label">Rate Control</label>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <select
+                  className="form-input font-mono"
+                  value={activeProfile?.quality.rate_control ?? "CBR"}
+                  onChange={(e) => {
+                    if (!activeProfile) return;
+                    const updated = {
+                      ...activeProfile,
+                      quality: { ...activeProfile.quality, rate_control: e.target.value },
+                    };
+                    setActiveProfileState(updated);
+                    setProfiles((current) => current.map((item) => item.id === updated.id ? updated : item));
+                    updateProfile(updated).catch(console.error);
+                  }}
+                  disabled={isStreaming || !activeProfile}
+                  style={{ flex: 1, minWidth: 0 }}
+                  title="The current verified integration applies CBR only in OBS Simple Output mode. Other choices are profile preferences and will be rejected during apply until Advanced Output support is implemented."
+                >
+                  <option value="CBR">CBR — supported in Simple Output</option>
+                  <option value="VBR">VBR — Advanced Output required</option>
+                  <option value="CRF">CRF — Advanced Output required</option>
+                  <option value="CQP">CQP — Advanced Output required</option>
+                </select>
+                <input
+                  className="form-input font-mono"
+                  value={`${activeProfile?.quality.keyframe_interval_sec ?? 2}s Keyframe`}
+                  readOnly
+                  aria-label="Keyframe interval"
+                  title="The current Simple Output workflow enforces a 2-second keyframe interval."
+                  style={{ width: "118px" }}
+                />
+              </div>
+              <span className="form-label">Only CBR is applied by the current Simple Output integration; alternative modes are saved per profile but not yet applied.</span>
             </div>
           </div>
+
+          <div className="quality-action-row" style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", justifyContent: "flex-end", alignItems: "center" }}>
+            <button
+              className="btn btn-secondary"
+              onClick={handleResetQualitySettings}
+              disabled={!activeProfile || isStreaming || isResettingQuality || isApplyingQuality}
+              title="Reset this profile's quality preferences to Standard Balanced defaults. This does not apply them to OBS."
+            >
+              {isResettingQuality ? "Resetting…" : "Reset Quality Settings"}
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={handleApplyVideoSettingsToObs}
+              disabled={!connectionStatus.connected || isStreaming || isApplyingQuality || isResettingQuality}
+              title={
+                isStreaming
+                  ? "Stop the live stream before applying video and encoder quality settings."
+                  : "Apply video and encoder quality settings in OBS Simple Output mode"
+              }
+            >
+              {isApplyingQuality ? "Applying…" : "Apply Quality Settings to OBS"}
+            </button>
+          </div>
+
+          {activeProfile && activeProfile.quality.rate_control !== "CBR" && (
+            <div className="alert-box alert-warning">
+              <strong>Rate Control not yet applicable:</strong>
+              <span>
+                {activeProfile.quality.rate_control} is saved with this profile, but the verified OBS integration currently applies CBR only in Simple Output mode. Applying this profile will be rejected until proper Advanced Output encoder support is implemented. Choose CBR to apply the current workflow.
+              </span>
+            </div>
+          )}
+
 
           {isStreaming && (
             <div className="alert-box alert-warning">
@@ -1538,7 +1729,112 @@ export default function App() {
               <span>{qualityMessage.message}</span>
             </div>
           )}
-        </div>
+          {/* Profile-local OBS streaming rescale and network options */}
+          <div className="quality-output-options" style={{ borderTop: "1px solid var(--border-subtle)", paddingTop: "1rem", display: "flex", flexDirection: "column", gap: "0.9rem" }}>
+            <div className="card-title">
+              <span>OBS Streaming Output &amp; Network</span>
+              <span className="badge-tag">{obsOutputMode ? `Output: ${obsOutputMode}` : "Output mode unknown"}</span>
+            </div>
+            <p className="form-label">
+              These preferences are saved with the selected Tango profile. Apply them explicitly to write and verify the values in the active OBS profile.
+            </p>
+
+            <label style={{ display: "flex", alignItems: "center", gap: "0.55rem", cursor: obsOutputMode === "Advanced" ? "pointer" : "not-allowed" }}>
+              <input
+                type="checkbox"
+                checked={activeProfile?.quality.rescale_output_enabled ?? false}
+                onChange={(e) => handleProfileQualityPatch({ rescale_output_enabled: e.target.checked })}
+                disabled={!activeProfile || isStreaming || isApplyingOutputOptions || obsOutputMode !== "Advanced"}
+                style={{ width: "16px", height: "16px" }}
+              />
+              <span className="form-label" style={{ color: "var(--text-primary)" }}>
+                Rescale Output (Streaming)
+              </span>
+            </label>
+            {obsOutputMode !== "Advanced" && (
+              <div className="alert-box alert-info">
+                <span>OBS Settings → Output → Output Mode must be set to Advanced before Streaming → Rescale Output can be enabled. Dynamic Bitrate is available independently.</span>
+              </div>
+            )}
+
+            <div className="input-row">
+              <div className="form-group">
+                <label className="form-label">Rescale Width</label>
+                <input
+                  className="form-input font-mono"
+                  type="number"
+                  min="2"
+                  max="8192"
+                  value={activeProfile?.quality.rescale_output_width ?? 720}
+                  onChange={(e) => {
+                    const value = Number(e.target.value);
+                    if (Number.isInteger(value) && value >= 2 && value <= 8192) handleProfileQualityPatch({ rescale_output_width: value });
+                  }}
+                  disabled={!activeProfile || isStreaming || isApplyingOutputOptions}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Rescale Height</label>
+                <input
+                  className="form-input font-mono"
+                  type="number"
+                  min="2"
+                  max="8192"
+                  value={activeProfile?.quality.rescale_output_height ?? 1280}
+                  onChange={(e) => {
+                    const value = Number(e.target.value);
+                    if (Number.isInteger(value) && value >= 2 && value <= 8192) handleProfileQualityPatch({ rescale_output_height: value });
+                  }}
+                  disabled={!activeProfile || isStreaming || isApplyingOutputOptions}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Rescale Filter</label>
+                <select
+                  className="form-input font-mono"
+                  value={activeProfile?.quality.rescale_filter ?? "lanczos"}
+                  onChange={(e) => handleProfileQualityPatch({ rescale_filter: e.target.value })}
+                  disabled={!activeProfile || isStreaming || isApplyingOutputOptions}
+                >
+                  <option value="point">Point (fastest)</option>
+                  <option value="bilinear">Bilinear</option>
+                  <option value="bicubic">Bicubic</option>
+                  <option value="lanczos">Lanczos (sharp)</option>
+                  <option value="area">Area</option>
+                </select>
+              </div>
+            </div>
+
+            <label style={{ display: "flex", alignItems: "flex-start", gap: "0.55rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={activeProfile?.quality.dynamic_bitrate_enabled ?? false}
+                onChange={(e) => handleProfileQualityPatch({ dynamic_bitrate_enabled: e.target.checked })}
+                disabled={!activeProfile || isStreaming || isApplyingOutputOptions}
+                style={{ width: "16px", height: "16px", marginTop: "0.2rem" }}
+              />
+              <span>
+                <span className="form-label" style={{ color: "var(--text-primary)" }}>Enable OBS Dynamic Bitrate</span>
+                <span className="form-label" style={{ display: "block" }}>Allow OBS to dynamically change bitrate to manage network congestion (OBS Settings → Advanced → Network).</span>
+              </span>
+            </label>
+
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                className="btn btn-secondary"
+                onClick={handleApplyOutputOptionsToObs}
+                disabled={!activeProfile || !connectionStatus.connected || isStreaming || isApplyingOutputOptions}
+              >
+                {isApplyingOutputOptions ? "Applying & Verifying…" : "Apply Rescale & Dynamic Bitrate to OBS"}
+              </button>
+            </div>
+
+            {outputOptionsMessage && (
+              <div className={`alert-box ${outputOptionsMessage.success ? "alert-success" : "alert-error"}`}>
+                <span>{outputOptionsMessage.message}</span>
+              </div>
+            )}
+          </div>        </div>
 
         {/* ── Full-Width: Tango Live Stream Control & Health Metrics ── */}
         <div className="glass-card full-width-card">

@@ -15,6 +15,16 @@ impl Default for StreamingServiceType {
     }
 }
 
+fn default_rescale_output_width() -> u32 {
+    720
+}
+fn default_rescale_output_height() -> u32 {
+    1280
+}
+fn default_rescale_filter() -> String {
+    "lanczos".to_string()
+}
+
 /// Encoding and video/audio quality settings for a streaming profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualitySettings {
@@ -34,6 +44,21 @@ pub struct QualitySettings {
     pub rate_control: String,
     /// Keyframe interval in seconds (default 2s for RTMP)
     pub keyframe_interval_sec: u32,
+    /// Whether Advanced Output streaming rescales the encoded stream.
+    #[serde(default)]
+    pub rescale_output_enabled: bool,
+    /// Streaming rescale width in Advanced Output mode.
+    #[serde(default = "default_rescale_output_width")]
+    pub rescale_output_width: u32,
+    /// Streaming rescale height in Advanced Output mode.
+    #[serde(default = "default_rescale_output_height")]
+    pub rescale_output_height: u32,
+    /// OBS downscale filter: point, bicubic, bilinear, lanczos, or area.
+    #[serde(default = "default_rescale_filter")]
+    pub rescale_filter: String,
+    /// OBS network option: dynamically reduce bitrate during congestion.
+    #[serde(default)]
+    pub dynamic_bitrate_enabled: bool,
 }
 
 impl Default for QualitySettings {
@@ -48,6 +73,11 @@ impl Default for QualitySettings {
             encoder: "obs_x264".into(),
             rate_control: "CBR".into(),
             keyframe_interval_sec: 2,
+            rescale_output_enabled: false,
+            rescale_output_width: 720,
+            rescale_output_height: 1280,
+            rescale_filter: "lanczos".into(),
+            dynamic_bitrate_enabled: false,
         }
     }
 }
@@ -72,6 +102,11 @@ impl QualityPresetKind {
                 encoder: "obs_x264".into(),
                 rate_control: "CBR".into(),
                 keyframe_interval_sec: 2,
+                rescale_output_enabled: false,
+                rescale_output_width: 720,
+                rescale_output_height: 1280,
+                rescale_filter: "lanczos".into(),
+                dynamic_bitrate_enabled: false,
             },
             Self::LowBandwidth => QualitySettings {
                 output_width: 720,
@@ -82,6 +117,11 @@ impl QualityPresetKind {
                 encoder: "obs_x264".into(),
                 rate_control: "CBR".into(),
                 keyframe_interval_sec: 2,
+                rescale_output_enabled: false,
+                rescale_output_width: 720,
+                rescale_output_height: 1280,
+                rescale_filter: "lanczos".into(),
+                dynamic_bitrate_enabled: false,
             },
             Self::VeryLowBandwidth => QualitySettings {
                 output_width: 540,
@@ -92,6 +132,11 @@ impl QualityPresetKind {
                 encoder: "obs_x264".into(),
                 rate_control: "CBR".into(),
                 keyframe_interval_sec: 2,
+                rescale_output_enabled: false,
+                rescale_output_width: 720,
+                rescale_output_height: 1280,
+                rescale_filter: "lanczos".into(),
+                dynamic_bitrate_enabled: false,
             },
         }
     }
@@ -107,7 +152,10 @@ pub struct ProfileObsConnection {
 
 impl Default for ProfileObsConnection {
     fn default() -> Self {
-        Self { host: "127.0.0.1".into(), port: 4455 }
+        Self {
+            host: "127.0.0.1".into(),
+            port: 4455,
+        }
     }
 }
 
@@ -153,7 +201,12 @@ impl Default for ProfileCompositionConfig {
             pan_x: 0.0,
             pan_y: 0.0,
             has_crop: false,
-            crop: Some(ProfileCropConfig { left: 0.1, top: 0.1, right: 0.1, bottom: 0.1 }),
+            crop: Some(ProfileCropConfig {
+                left: 0.1,
+                top: 0.1,
+                right: 0.1,
+                bottom: 0.1,
+            }),
         }
     }
 }

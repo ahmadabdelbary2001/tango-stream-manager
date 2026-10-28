@@ -144,6 +144,25 @@ pub struct AppliedObsQualitySettingsPayload {
     pub keyframe_interval_sec: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObsStreamingOutputOptionsPayload {
+    pub rescale_output_enabled: bool,
+    pub rescale_output_width: u32,
+    pub rescale_output_height: u32,
+    pub rescale_filter: String,
+    pub dynamic_bitrate_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObsStreamingOutputSettingsPayload {
+    pub output_mode: String,
+    pub rescale_output_enabled: bool,
+    pub rescale_output_width: u32,
+    pub rescale_output_height: u32,
+    pub rescale_filter: String,
+    pub dynamic_bitrate_enabled: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Streaming & Health Payloads
 // ---------------------------------------------------------------------------
@@ -645,6 +664,50 @@ async fn apply_obs_quality_settings(
     })
 }
 #[tauri::command]
+async fn get_obs_streaming_output_settings(
+    obs_config: ObsConnectionConfig,
+) -> Result<ObsStreamingOutputSettingsPayload, String> {
+    let output = make_output(&obs_config)?;
+    let settings = output
+        .get_streaming_output_options_async()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(ObsStreamingOutputSettingsPayload {
+        output_mode: settings.output_mode,
+        rescale_output_enabled: settings.rescale_output_enabled,
+        rescale_output_width: settings.rescale_output_width,
+        rescale_output_height: settings.rescale_output_height,
+        rescale_filter: settings.rescale_filter,
+        dynamic_bitrate_enabled: settings.dynamic_bitrate_enabled,
+    })
+}
+
+#[tauri::command]
+async fn apply_obs_streaming_output_options(
+    obs_config: ObsConnectionConfig,
+    settings: ObsStreamingOutputOptionsPayload,
+) -> Result<ObsStreamingOutputSettingsPayload, String> {
+    let output = make_output(&obs_config)?;
+    let actual = output
+        .apply_streaming_output_options_async(
+            settings.rescale_output_enabled,
+            settings.rescale_output_width,
+            settings.rescale_output_height,
+            &settings.rescale_filter,
+            settings.dynamic_bitrate_enabled,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(ObsStreamingOutputSettingsPayload {
+        output_mode: actual.output_mode,
+        rescale_output_enabled: actual.rescale_output_enabled,
+        rescale_output_width: actual.rescale_output_width,
+        rescale_output_height: actual.rescale_output_height,
+        rescale_filter: actual.rescale_filter,
+        dynamic_bitrate_enabled: actual.dynamic_bitrate_enabled,
+    })
+}
+#[tauri::command]
 async fn get_stream_status(obs_config: ObsConnectionConfig) -> Result<StreamStatusPayload, String> {
     let output = make_output(&obs_config)?;
     let status = output
@@ -1090,6 +1153,8 @@ pub fn run() {
             get_obs_video_settings,
             set_obs_video_settings,
             apply_obs_quality_settings,
+            get_obs_streaming_output_settings,
+            apply_obs_streaming_output_options,
             get_stream_status,
             start_stream,
             start_profile_stream,

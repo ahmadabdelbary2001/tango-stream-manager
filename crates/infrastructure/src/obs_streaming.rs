@@ -16,11 +16,284 @@ struct RtmpCustomSettings<'a> {
     key: &'a str,
 }
 
+/// OBS streaming-output and network settings as read from the active OBS profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObsStreamingOutputOptions {
+    pub output_mode: String,
+    pub rescale_output_enabled: bool,
+    pub rescale_output_width: u32,
+    pub rescale_output_height: u32,
+    pub rescale_filter: String,
+    pub dynamic_bitrate_enabled: bool,
+}
 impl ObsVideoOutput {
     // ------------------------------------------------------------------
     // Async streaming helpers (called by Tauri commands directly)
     // ------------------------------------------------------------------
 
+    async fn output_read_profile_parameter(
+        client: &obws::Client,
+        category: &str,
+        name: &str,
+    ) -> Result<Option<String>, StreamingError> {
+        client
+            .profiles()
+            .parameter(category, name)
+            .await
+            .map(|parameter| parameter.value.or(parameter.default_value))
+            .map_err(|error| {
+                StreamingError::Backend(format!(
+                    "failed to read OBS profile parameter {category}.{name}: {error}"
+                ))
+            })
+    }
+
+    async fn output_write_profile_parameter(
+        client: &obws::Client,
+        category: &str,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<(), StreamingError> {
+        client
+            .profiles()
+            .set_parameter(SetParameter {
+                category,
+                name,
+                value,
+            })
+            .await
+            .map_err(|error| {
+                StreamingError::Backend(format!(
+                    "failed to write OBS profile parameter {category}.{name}: {error}"
+                ))
+            })
+    }
+
+    async fn output_rollback_parameters(
+        client: &obws::Client,
+        previous: &[(&str, &str, Option<String>)],
+    ) {
+        for (category, name, value) in previous {
+            if let Err(error) =
+                Self::output_write_profile_parameter(client, category, name, value.as_deref()).await
+            {
+                eprintln!("OBS output-options rollback failed for {category}.{name}: {error}");
+            }
+        }
+    }
+
+    fn parse_obs_bool(value: Option<String>, key: &str) -> Result<bool, StreamingError> {
+        let Some(value) = value else {
+            return Ok(false);
+        };
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "true" | "1" | "yes" => Ok(true),
+            "false" | "0" | "no" | "" => Ok(false),
+            other => Err(StreamingError::Backend(format!(
+                "OBS returned an unexpected boolean for {key}: '{other}'"
+            ))),
+        }
+    }
+
+    fn rescale_filter_id(name: &str) -> Result<u32, StreamingError> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "point" => Ok(1),
+            "bicubic" => Ok(2),
+            "bilinear" => Ok(3),
+            "lanczos" => Ok(4),
+            "area" => Ok(5),
+            other => Err(StreamingError::Backend(format!(
+                "Unsupported OBS rescale filter '{other}'. Choose Point, Bicubic, Bilinear, Lanczos, or Area."
+            ))),
+        }
+    }
+
+    fn rescale_filter_name(id: u32) -> Option<&'static str> {
+        match id {
+            1 => Some("point"),
+            2 => Some("bicubic"),
+            3 => Some("bilinear"),
+            4 => Some("lanczos"),
+            5 => Some("area"),
+            _ => None,
+        }
+    }
+
+    async fn read_streaming_output_options(
+        client: &obws::Client,
+    ) -> Result<ObsStreamingOutputOptions, StreamingError> {
+        let mode = Self::output_read_profile_parameter(client, "Output", "Mode")
+            .await?
+            .unwrap_or_else(|| "Simple".to_string());
+        let dynamic_bitrate = Self::parse_obs_bool(
+            Self::output_read_profile_parameter(client, "Output", "DynamicBitrate").await?,
+            "Output.DynamicBitrate",
+        )?;
+        let filter_text = Self::output_read_profile_parameter(client, "AdvOut", "RescaleFilter")
+            .await?
+            .unwrap_or_else(|| "0".to_string());
+        let filter_id = filter_text.trim().parse::<u32>().unwrap_or(0);
+        let filter_name = Self::rescale_filter_name(filter_id)
+            .unwrap_or("lanczos")
+            .to_string();
+        let rescale_enabled = filter_id != 0;
+        let rescale_resolution =
+            Self::output_read_profile_parameter(client, "AdvOut", "RescaleRes").await?;
+        let fallback_video = client.config().video_settings().await.map_err(|error| {
+            StreamingError::Backend(format!(
+                "failed to read current video settings while reading streaming output options: {error}"
+            ))
+        })?;
+        let parsed = rescale_resolution.as_deref().and_then(|value| {
+            let (width, height) = value.split_once('x')?;
+            let width = width.trim().parse::<u32>().ok()?;
+            let height = height.trim().parse::<u32>().ok()?;
+            if width == 0 || height == 0 {
+                None
+            } else {
+                Some((width, height))
+            }
+        });
+        let (width, height) =
+            parsed.unwrap_or((fallback_video.output_width, fallback_video.output_height));
+
+        Ok(ObsStreamingOutputOptions {
+            output_mode: mode,
+            rescale_output_enabled: rescale_enabled,
+            rescale_output_width: width.max(1),
+            rescale_output_height: height.max(1),
+            rescale_filter: filter_name,
+            dynamic_bitrate_enabled: dynamic_bitrate,
+        })
+    }
+
+    /// Read OBS streaming rescale and dynamic bitrate settings from the active OBS profile.
+    pub async fn get_streaming_output_options_async(
+        &self,
+    ) -> Result<ObsStreamingOutputOptions, StreamingError> {
+        let client = self
+            .connect_client()
+            .await
+            .map_err(|error| StreamingError::BackendUnavailable(error.to_string()))?;
+        Self::read_streaming_output_options(&client).await
+    }
+
+    /// Apply and verify OBS streaming rescale and dynamic bitrate settings.
+    /// Rescale Output is available only for Advanced Output; DynamicBitrate is supported in either mode.
+    pub async fn apply_streaming_output_options_async(
+        &self,
+        rescale_output_enabled: bool,
+        rescale_output_width: u32,
+        rescale_output_height: u32,
+        rescale_filter: &str,
+        dynamic_bitrate_enabled: bool,
+    ) -> Result<ObsStreamingOutputOptions, StreamingError> {
+        let status = self.get_stream_status_async().await?;
+        if status.active {
+            return Err(StreamingError::ActiveStreamConflict(
+                "Stop the live stream before changing Rescale Output or Dynamic Bitrate settings."
+                    .into(),
+            ));
+        }
+
+        let client = self
+            .connect_client()
+            .await
+            .map_err(|error| StreamingError::BackendUnavailable(error.to_string()))?;
+        let mode = Self::output_read_profile_parameter(&client, "Output", "Mode")
+            .await?
+            .unwrap_or_else(|| "Simple".to_string());
+
+        // In Simple mode, leave the saved Advanced-Output rescale fields untouched but
+        // still permit applying Dynamic Bitrate. The UI reports that rescaling was skipped.
+        if rescale_output_enabled
+            && (!(2..=8192).contains(&rescale_output_width)
+                || !(2..=8192).contains(&rescale_output_height))
+        {
+            return Err(StreamingError::Backend(
+                "Rescale width and height must each be between 2 and 8192 pixels.".into(),
+            ));
+        }
+
+        let filter_id = if rescale_output_enabled {
+            Self::rescale_filter_id(rescale_filter)?
+        } else {
+            0
+        };
+        let dynamic_text = if dynamic_bitrate_enabled {
+            "true"
+        } else {
+            "false"
+        };
+        let filter_text = filter_id.to_string();
+        let rescale_text = format!("{rescale_output_width}x{rescale_output_height}");
+
+        let mut previous: Vec<(&str, &str, Option<String>)> = vec![(
+            "Output",
+            "DynamicBitrate",
+            Self::output_read_profile_parameter(&client, "Output", "DynamicBitrate").await?,
+        )];
+        if mode == "Advanced" {
+            previous.push((
+                "AdvOut",
+                "RescaleFilter",
+                Self::output_read_profile_parameter(&client, "AdvOut", "RescaleFilter").await?,
+            ));
+            previous.push((
+                "AdvOut",
+                "RescaleRes",
+                Self::output_read_profile_parameter(&client, "AdvOut", "RescaleRes").await?,
+            ));
+        }
+
+        let mut updates: Vec<(&str, &str, String)> =
+            vec![("Output", "DynamicBitrate", dynamic_text.to_string())];
+        if mode == "Advanced" {
+            updates.push(("AdvOut", "RescaleFilter", filter_text));
+            updates.push(("AdvOut", "RescaleRes", rescale_text));
+        }
+        for (category, name, value) in updates {
+            if let Err(error) =
+                Self::output_write_profile_parameter(&client, category, name, Some(value.as_str()))
+                    .await
+            {
+                Self::output_rollback_parameters(&client, &previous).await;
+                return Err(StreamingError::Backend(format!(
+                    "Could not apply {category}.{name}; rollback of previous output settings was attempted. {error}"
+                )));
+            }
+        }
+
+        let actual = match Self::read_streaming_output_options(&client).await {
+            Ok(value) => value,
+            Err(error) => {
+                Self::output_rollback_parameters(&client, &previous).await;
+                return Err(StreamingError::Backend(format!(
+                    "OBS accepted the output-option writes but read-back verification failed; rollback was attempted. {error}"
+                )));
+            }
+        };
+        let dynamic_matches = actual.dynamic_bitrate_enabled == dynamic_bitrate_enabled;
+        let rescale_matches = if mode == "Advanced" {
+            actual.rescale_output_enabled == rescale_output_enabled
+                && actual.rescale_output_width == rescale_output_width
+                && actual.rescale_output_height == rescale_output_height
+                && (!rescale_output_enabled
+                    || actual.rescale_filter == rescale_filter.trim().to_ascii_lowercase())
+        } else {
+            // Rescale is an Advanced Output-only option and is intentionally not changed in Simple mode.
+            true
+        };
+        if !(dynamic_matches && rescale_matches) {
+            Self::output_rollback_parameters(&client, &previous).await;
+            return Err(StreamingError::Backend(
+                "OBS did not return all requested streaming output/network values during read-back verification. Rollback was attempted; inspect OBS Settings → Output and Settings → Advanced → Network.".into(),
+            ));
+        }
+
+        Ok(actual)
+    }
     pub async fn get_stream_status_async(&self) -> Result<StreamStatus, StreamingError> {
         let client = self
             .connect_client()
