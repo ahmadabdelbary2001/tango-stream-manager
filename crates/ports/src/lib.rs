@@ -1,4 +1,4 @@
-use domain::VideoComposition;
+use domain::{StreamingProfile, VideoComposition};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,15 +65,46 @@ pub enum VideoOutputError {
 }
 
 /// Output boundary used by the application layer.
-///
-/// The application knows about a generic video output.
-/// It does not know whether the implementation is OBS,
-/// another renderer, or a test fake.
 pub trait VideoOutputPort {
     fn apply_video_composition(
         &mut self,
         request: &VideoOutputRequest,
     ) -> Result<(), VideoOutputError>;
+}
+
+// ---------------------------------------------------------------------------
+// OBS Video Settings & Statistics Types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObsVideoSettings {
+    pub base_width: u32,
+    pub base_height: u32,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub fps_numerator: u32,
+    pub fps_denominator: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtendedStreamStatus {
+    pub active: bool,
+    pub reconnecting: bool,
+    pub timecode: Option<String>,
+    pub duration_seconds: u64,
+    pub congestion: f32,
+    pub bytes_sent: u64,
+    pub kbits_per_sec: Option<u64>,
+    pub dropped_frames: u64,
+    pub total_frames: u64,
+
+    // Rendering / Engine metrics
+    pub cpu_usage: f64,
+    pub memory_usage_mb: f64,
+    pub active_fps: f64,
+    pub render_skipped_frames: u64,
+    pub render_total_frames: u64,
+    pub average_frame_render_time_ms: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +125,9 @@ pub enum StreamingError {
 
     #[error("stream key is invalid: {0}")]
     InvalidStreamKey(String),
+
+    #[error("cannot modify settings while stream is active: {0}")]
+    ActiveStreamConflict(String),
 }
 
 /// Live stream status as reported by the streaming backend.
@@ -101,7 +135,7 @@ pub enum StreamingError {
 pub struct StreamStatus {
     /// Whether the stream is currently active.
     pub active: bool,
-    /// Timecode elapsed since stream start (HH:MM:SS.mmm), if active.
+    /// Timecode elapsed since stream start (HH:MM:SS), if active.
     pub timecode: Option<String>,
     /// Current output bitrate in Kbps, if available.
     pub kbits_per_sec: Option<u64>,
@@ -145,31 +179,84 @@ impl StreamConfig {
 }
 
 /// Streaming boundary port — implemented by the OBS adapter (or test fakes).
-///
-/// Sync wrappers are used here; the OBS infrastructure adapter uses its
-/// internal Tokio runtime to fulfil these contracts.
 pub trait StreamingPort {
     /// Query the current live stream status.
     fn get_stream_status(&self) -> Result<StreamStatus, StreamingError>;
 
-    /// Update the RTMP service settings (server + key) and start the stream.
+    /// Query comprehensive stream health and render engine statistics.
+    fn get_extended_stream_status(&self) -> Result<ExtendedStreamStatus, StreamingError>;
+
+    /// Retrieve current OBS canvas base and output dimensions and framerate.
+    fn get_video_settings(&self) -> Result<ObsVideoSettings, StreamingError>;
+
+    /// Configure OBS canvas and stream output dimensions and framerate.
     ///
-    /// If the stream is already active this is a no-op (returns `Ok(())`).
+    /// Must fail with `ActiveStreamConflict` if called while streaming is active.
+    fn set_video_settings(&self, settings: &ObsVideoSettings) -> Result<(), StreamingError>;
+
+    /// Update the RTMP service settings (server + key) and start the stream.
     fn start_stream(&self, config: &StreamConfig) -> Result<(), StreamingError>;
 
     /// Stop the active stream gracefully.
-    ///
-    /// If the stream is already stopped this is a no-op (returns `Ok(())`).
     fn stop_stream(&self) -> Result<(), StreamingError>;
 
     /// Update the RTMP stream key without starting/stopping the stream.
     fn set_stream_key(&self, config: &StreamConfig) -> Result<(), StreamingError>;
 }
 
+// ---------------------------------------------------------------------------
+// Streaming Profile Repository Port
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum ProfileStorageError {
+    #[error("failed to read profile storage: {0}")]
+    ReadError(String),
+
+    #[error("failed to write profile storage: {0}")]
+    WriteError(String),
+
+    #[error("profile serialization failed: {0}")]
+    SerializationError(String),
+
+    #[error("profile not found: {0}")]
+    NotFound(String),
+}
+
+pub trait ProfileRepositoryPort: Send + Sync {
+    fn list_profiles(&self) -> Result<Vec<StreamingProfile>, ProfileStorageError>;
+    fn get_profile(&self, id: &str) -> Result<Option<StreamingProfile>, ProfileStorageError>;
+    fn save_profile(&self, profile: &StreamingProfile) -> Result<(), ProfileStorageError>;
+    fn delete_profile(&self, id: &str) -> Result<bool, ProfileStorageError>;
+    fn get_active_profile_id(&self) -> Result<Option<String>, ProfileStorageError>;
+    fn set_active_profile_id(&self, id: &str) -> Result<(), ProfileStorageError>;
+}
+
+// ---------------------------------------------------------------------------
+// Secure Credential Storage Port
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum CredentialError {
+    #[error("secure credential store is unavailable: {0}")]
+    Unavailable(String),
+
+    #[error("failed to access credential store: {0}")]
+    StorageError(String),
+
+    #[error("credential key reference is invalid: {0}")]
+    InvalidReference(String),
+}
+
+pub trait CredentialStorePort: Send + Sync {
+    fn get_credential(&self, key_ref: &str) -> Result<Option<String>, CredentialError>;
+    fn set_credential(&self, key_ref: &str, secret: &str) -> Result<(), CredentialError>;
+    fn delete_credential(&self, key_ref: &str) -> Result<(), CredentialError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use domain::{MediaAssetId, VideoSource, VideoTransform};
 
     fn composition() -> VideoComposition {
@@ -177,9 +264,7 @@ mod tests {
             source: VideoSource::Original {
                 asset_id: MediaAssetId("video-1".into()),
             },
-
             crop: None,
-
             transform: VideoTransform::default(),
         }
     }

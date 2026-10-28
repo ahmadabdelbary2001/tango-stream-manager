@@ -432,6 +432,57 @@ pub fn calculate_pan_limits(
     })
 }
 
+/// Calculate post-crop visible source dimensions using integer rounding identical to OBS.
+pub fn calculate_visible_source_size(
+    source: Size,
+    crop_left: f64,
+    crop_top: f64,
+    crop_right: f64,
+    crop_bottom: f64,
+) -> Result<Size, CompositionError> {
+    validate_size(source)?;
+    if !crop_left.is_finite()
+        || !crop_top.is_finite()
+        || !crop_right.is_finite()
+        || !crop_bottom.is_finite()
+        || crop_left < 0.0
+        || crop_top < 0.0
+        || crop_right < 0.0
+        || crop_bottom < 0.0
+        || crop_left + crop_right >= 1.0
+        || crop_top + crop_bottom >= 1.0
+    {
+        return Err(CompositionError::InvalidCropFrame);
+    }
+
+    let left_px = (crop_left * source.width).round();
+    let top_px = (crop_top * source.height).round();
+    let right_px = (crop_right * source.width).round();
+    let bottom_px = (crop_bottom * source.height).round();
+
+    let visible_w = source.width - (left_px + right_px);
+    let visible_h = source.height - (top_px + bottom_px);
+
+    if visible_w <= 0.0 || visible_h <= 0.0 {
+        return Err(CompositionError::InvalidCropFrame);
+    }
+
+    Ok(Size::new(visible_w, visible_h))
+}
+
+/// Calculate safe pan limits for the target canvas.
+///
+/// Ensures the canvas is fully covered by the rendered video.
+/// If an axis has no overflow at the current scale, its pan range collapses to zero.
+pub fn calculate_safe_canvas_pan_limits(
+    visible_source: Size,
+    canvas: Size,
+    zoom: f64,
+) -> Result<PanLimits, CompositionError> {
+    let canvas_frame = Rect::new(0.0, 0.0, canvas.width, canvas.height);
+    calculate_pan_limits(visible_source, canvas, canvas_frame, zoom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +621,104 @@ mod tests {
         let frame_ratio = crop_frame().width / crop_frame().height;
 
         assert_close(source_ratio, frame_ratio);
+    }
+
+    #[test]
+    fn safe_canvas_pan_limits_collapse_zero_overflow_axis() {
+        // Portrait 568x762 in 720x1280 canvas at zoom 1.0
+        // Height matches canvas exactly, so Pan Y must collapse to [0, 0].
+        let limits = calculate_safe_canvas_pan_limits(source(), canvas(), 1.0).unwrap();
+
+        assert_close(limits.min_y, 0.0);
+        assert_close(limits.max_y, 0.0);
+
+        // Pan X has extra width: 954.1207 - 720 = 234.1207
+        assert_close(limits.min_x, -117.060367);
+        assert_close(limits.max_x, 117.060367);
+    }
+
+    #[test]
+    fn safe_canvas_pan_limits_expand_with_zoom() {
+        let limits = calculate_safe_canvas_pan_limits(source(), canvas(), 1.5).unwrap();
+
+        // Rendered height: 1280 * 1.5 = 1920 -> extra = 640 -> [-320, 320]
+        assert_close(limits.min_y, -320.0);
+        assert_close(limits.max_y, 320.0);
+
+        // Rendered width: 954.1207 * 1.5 = 1431.1811 -> extra = 711.1811 -> [-355.5905, 355.5905]
+        assert_close(limits.min_x, -355.59055);
+        assert_close(limits.max_x, 355.59055);
+    }
+
+    #[test]
+    fn landscape_source_in_portrait_canvas_collapses_vertical_pan() {
+        // Landscape 1920x1080 into 720x1280 portrait canvas
+        let landscape = Size::new(1920.0, 1080.0);
+        let limits = calculate_safe_canvas_pan_limits(landscape, canvas(), 1.0).unwrap();
+
+        assert_close(limits.min_y, 0.0);
+        assert_close(limits.max_y, 0.0);
+
+        // Scale = 1280 / 1080 = 1.185185...
+        // Rendered width = 1920 * (1280/1080) = 2275.5555...
+        // Extra width = 2275.5555 - 720 = 1555.5555...
+        // half_extra_x = 777.7777...
+        assert_close(limits.min_x, -777.77777);
+        assert_close(limits.max_x, 777.77777);
+    }
+
+    #[test]
+    fn square_source_in_portrait_canvas_collapses_vertical_pan() {
+        let square = Size::new(1080.0, 1080.0);
+        let limits = calculate_safe_canvas_pan_limits(square, canvas(), 1.0).unwrap();
+
+        assert_close(limits.min_y, 0.0);
+        assert_close(limits.max_y, 0.0);
+
+        // Scale = 1280 / 1080 = 1.185185...
+        // Rendered width = 1280 -> extra = 1280 - 720 = 560 -> [-280, 280]
+        assert_close(limits.min_x, -280.0);
+        assert_close(limits.max_x, 280.0);
+    }
+
+    #[test]
+    fn visible_source_size_uses_obs_integer_rounding() {
+        // 568x762 with 10% crop
+        let vis = calculate_visible_source_size(source(), 0.10, 0.10, 0.10, 0.10).unwrap();
+
+        // 568 - (57 + 57) = 454
+        assert_close(vis.width, 454.0);
+        // 762 - (76 + 76) = 610
+        assert_close(vis.height, 610.0);
+    }
+
+    #[test]
+    fn pan_boundaries_touch_canvas_edges_without_gaps() {
+        let limits = calculate_safe_canvas_pan_limits(source(), canvas(), 1.20).unwrap();
+
+        let geom_at_max_x = calculate_geometry(
+            source(),
+            canvas(),
+            VideoTransform::new(1.20, limits.max_x, 0.0),
+        )
+        .unwrap();
+
+        // Video left edge must touch canvas left edge (0.0)
+        assert_close(geom_at_max_x.rendered_rect.x, 0.0);
+        // Video right edge must be >= canvas.width
+        assert!(geom_at_max_x.rendered_rect.right() >= canvas().width - EPSILON);
+
+        let geom_at_min_x = calculate_geometry(
+            source(),
+            canvas(),
+            VideoTransform::new(1.20, limits.min_x, 0.0),
+        )
+        .unwrap();
+
+        // Video right edge must touch canvas right edge
+        assert_close(geom_at_min_x.rendered_rect.right(), canvas().width);
+        // Video left edge must be <= 0.0
+        assert!(geom_at_min_x.rendered_rect.x <= 0.0 + EPSILON);
     }
 }
 

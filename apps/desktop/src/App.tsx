@@ -1,32 +1,42 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useTransition } from "react";
 import {
   testObsConnection,
   listScenes,
   applyVideoComposition,
+  calculatePanLimits,
+  getObsVideoSettings,
+  setObsVideoSettings,
   getStreamStatus,
-  startStream,
+  startProfileStream,
   stopStream,
-  setStreamKey as setStreamKeyApi,
+  listProfiles,
+  getActiveProfile,
+  setActiveProfile as setActiveProfileApi,
+  createProfile,
+  updateProfile,
+  duplicateProfile,
+  deleteProfile,
+  getProfileStreamKey,
+  setProfileStreamKey,
   ObsConnectionConfig,
   ObsConnectionStatus,
   ApplyCompositionPayload,
-  StreamStatus,
+  StreamStatusPayload,
+  ProfileSummaryDto,
+  ObsVideoSettingsPayload,
+  PanLimitsResponsePayload,
 } from "./api/obs";
 import "./App.css";
 
-const SETTINGS_KEY = "tsm_user_settings";
+const SETTINGS_KEY = "tsm_connection_settings";
 
-interface PersistedSettings {
+interface PersistedConnectionSettings {
   obsHost?: string;
   obsPort?: number;
-  sceneName?: string;
-  sourceName?: string;
-  sourcePath?: string;
-  rtmpServer?: string;
 }
 
 export default function App() {
-  const savedSettings: PersistedSettings | null = (() => {
+  const savedConnection: PersistedConnectionSettings | null = (() => {
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
       return raw ? JSON.parse(raw) : null;
@@ -37,33 +47,44 @@ export default function App() {
 
   // ── OBS Connection ──────────────────────────────────────────────────────
   const [obsConfig, setObsConfig] = useState<ObsConnectionConfig>({
-    host: savedSettings?.obsHost ?? "127.0.0.1",
-    port: savedSettings?.obsPort ?? 4455,
+    host: savedConnection?.obsHost ?? "127.0.0.1",
+    port: savedConnection?.obsPort ?? 4455,
     password: "",
   });
 
-  const [connectionStatus, setConnectionStatus] = useState<ObsConnectionStatus>(
-    {
-      connected: false,
-      obs_version: null,
-      obs_web_socket_version: null,
-      rpc_version: null,
-      error_message: null,
-    }
-  );
+  const [connectionStatus, setConnectionStatus] = useState<ObsConnectionStatus>({
+    connected: false,
+    obs_version: null,
+    obs_web_socket_version: null,
+    rpc_version: null,
+    error_message: null,
+  });
 
   const [availableScenes, setAvailableScenes] = useState<string[]>([]);
   const [isTesting, setIsTesting] = useState(false);
-  const [isApplying, setIsApplying] = useState(false);
-  const [applyResult, setApplyResult] = useState<{
-    success: boolean;
-    message: string;
-  } | null>(null);
+  const [obsVideoSettings, setObsVideoSettingsState] = useState<ObsVideoSettingsPayload | null>(null);
+
+  // ── Profiles ────────────────────────────────────────────────────────────
+  const [profiles, setProfiles] = useState<ProfileSummaryDto[]>([]);
+  const [activeProfile, setActiveProfileState] = useState<ProfileSummaryDto | null>(null);
+  const [streamKey, setStreamKey] = useState<string>("");
+  const [showStreamKey, setShowStreamKey] = useState(false);
+  const [keySavedMessage, setKeySavedMessage] = useState<string | null>(null);
+  const [isSavingKey, setIsSavingKey] = useState(false);
+
+  // Profile Modals
+  const [showNewProfileModal, setShowNewProfileModal] = useState(false);
+  const [newProfileName, setNewProfileName] = useState("");
+  const [newProfilePreset, setNewProfilePreset] = useState("balanced");
+  const [newProfileServer, setNewProfileServer] = useState("");
+  const [newProfileKey, setNewProfileKey] = useState("");
+
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // ── Scene & Composition ─────────────────────────────────────────────────
-  const [sceneName, setSceneName] = useState(savedSettings?.sceneName ?? "Tango Scene");
-  const [sourceName, setSourceName] = useState(savedSettings?.sourceName ?? "Tango Video");
-  const [sourcePath, setSourcePath] = useState(savedSettings?.sourcePath ?? "E:\\smoke.mp4");
+  const [sceneName, setSceneName] = useState("Tango Scene");
+  const [sourceName, setSourceName] = useState("Tango Video");
+  const [sourcePath, setSourcePath] = useState("E:\\smoke.mp4");
 
   const [sourceWidth, setSourceWidth] = useState(568);
   const [sourceHeight, setSourceHeight] = useState(762);
@@ -80,19 +101,40 @@ export default function App() {
   const [cropRight, setCropRight] = useState(0.1);
   const [cropBottom, setCropBottom] = useState(0.1);
 
-  // ── Streaming ───────────────────────────────────────────────────────────
-  const [rtmpServer, setRtmpServer] = useState(
-    savedSettings?.rtmpServer ?? "rtmp://live.twitch.tv/live"
-  );
-  const [streamKey, setStreamKey] = useState("");
-  const [showStreamKey, setShowStreamKey] = useState(false);
-  const [streamStatus, setStreamStatus] = useState<StreamStatus | null>(null);
+  // Computed Safe Pan Limits
+  const [panLimits, setPanLimits] = useState<PanLimitsResponsePayload>({
+    min_x: -150,
+    max_x: 150,
+    min_y: 0,
+    max_y: 0,
+    visible_width: 568,
+    visible_height: 762,
+    x_locked: false,
+    y_locked: true,
+  });
+
+  const [isApplyingComposition, setIsApplyingComposition] = useState(false);
+  const [applyResult, setApplyResult] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
+
+  // ── Quality Settings & Staging ──────────────────────────────────────────
+  const [isApplyingQuality, setIsApplyingQuality] = useState(false);
+  const [qualityMessage, setQualityMessage] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
+
+  // ── Streaming & Live Health ─────────────────────────────────────────────
+  const [streamStatus, setStreamStatus] = useState<StreamStatusPayload | null>(null);
   const [isStartingStream, setIsStartingStream] = useState(false);
   const [isStoppingStream, setIsStoppingStream] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const statusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [, startTransition] = useTransition();
 
-  // ── Save non-sensitive settings to localStorage ─────────────────────────
+  // Save non-sensitive connection settings
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -100,27 +142,52 @@ export default function App() {
         JSON.stringify({
           obsHost: obsConfig.host,
           obsPort: obsConfig.port,
-          sceneName,
-          sourceName,
-          sourcePath,
-          rtmpServer,
         })
       );
     } catch {
       // ignore
     }
-  }, [obsConfig.host, obsConfig.port, sceneName, sourceName, sourcePath, rtmpServer]);
+  }, [obsConfig.host, obsConfig.port]);
 
-  // ── Init ────────────────────────────────────────────────────────────────
+  // Init: test OBS connection and load profiles
   useEffect(() => {
     handleTestConnection();
+    loadProfiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll stream status every 3 s while connected
+  // Recalculate Safe Pan Limits whenever geometry inputs change
+  useEffect(() => {
+    async function updateLimits() {
+      try {
+        const res = await calculatePanLimits({
+          source_width: sourceWidth,
+          source_height: sourceHeight,
+          canvas_width: canvasWidth,
+          canvas_height: canvasHeight,
+          zoom,
+          crop: hasCrop
+            ? { left: cropLeft, top: cropTop, right: cropRight, bottom: cropBottom }
+            : null,
+        });
+
+        setPanLimits(res);
+
+        // Clamp pan values within the safe range
+        setPanX((prev) => Math.max(res.min_x, Math.min(res.max_x, prev)));
+        setPanY((prev) => Math.max(res.min_y, Math.min(res.max_y, prev)));
+      } catch (err) {
+        console.error("Failed to compute pan limits:", err);
+      }
+    }
+    updateLimits();
+  }, [sourceWidth, sourceHeight, canvasWidth, canvasHeight, zoom, hasCrop, cropLeft, cropTop, cropRight, cropBottom]);
+
+  // Poll stream status every 2.5s while connected
   useEffect(() => {
     if (connectionStatus.connected) {
       pollStreamStatus();
-      statusPollRef.current = setInterval(pollStreamStatus, 3000);
+      statusPollRef.current = setInterval(pollStreamStatus, 2500);
     } else {
       if (statusPollRef.current) {
         clearInterval(statusPollRef.current);
@@ -134,6 +201,117 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectionStatus.connected]);
 
+  // ── Profiles Management Handlers ────────────────────────────────────────
+  async function loadProfiles() {
+    try {
+      const list = await listProfiles();
+      setProfiles(list);
+      const active = await getActiveProfile();
+      if (active) {
+        applyProfileToState(active);
+      } else if (list.length > 0) {
+        const first = await setActiveProfileApi(list[0].id);
+        applyProfileToState(first);
+      }
+    } catch (err) {
+      console.error("Failed to load profiles:", err);
+    }
+  }
+
+  async function applyProfileToState(profile: ProfileSummaryDto) {
+    setActiveProfileState(profile);
+    setSceneName(profile.composition.scene_name);
+    setSourceName(profile.composition.source_name);
+    setCanvasWidth(profile.composition.canvas_width);
+    setCanvasHeight(profile.composition.canvas_height);
+
+    // Fetch secret stream key securely from OS Keyring
+    try {
+      const key = await getProfileStreamKey(profile.id);
+      setStreamKey(key ?? "");
+    } catch {
+      setStreamKey("");
+    }
+  }
+
+  async function handleSwitchProfile(profileId: string) {
+    if (streamStatus?.active) {
+      alert("Cannot switch streaming profiles while live streaming. Stop the stream first.");
+      return;
+    }
+    try {
+      const selected = await setActiveProfileApi(profileId);
+      applyProfileToState(selected);
+      setKeySavedMessage(null);
+    } catch (err) {
+      alert(`Failed to switch profile: ${err}`);
+    }
+  }
+
+  async function handleCreateProfile() {
+    if (!newProfileName.trim()) return;
+    try {
+      const created = await createProfile({
+        name: newProfileName.trim(),
+        service_type: "tango",
+        server_url: newProfileServer.trim(),
+        stream_key: newProfileKey.trim(),
+        preset: newProfilePreset,
+      });
+      setShowNewProfileModal(false);
+      setNewProfileName("");
+      setNewProfileServer("");
+      setNewProfileKey("");
+      await loadProfiles();
+      applyProfileToState(created);
+    } catch (err) {
+      alert(`Failed to create profile: ${err}`);
+    }
+  }
+
+  async function handleDuplicateProfile() {
+    if (!activeProfile) return;
+    try {
+      const dup = await duplicateProfile(activeProfile.id);
+      await loadProfiles();
+      applyProfileToState(dup);
+    } catch (err) {
+      alert(`Failed to duplicate profile: ${err}`);
+    }
+  }
+
+  async function handleDeleteProfile() {
+    if (!activeProfile) return;
+    if (profiles.length <= 1) {
+      alert("Cannot delete the only remaining profile.");
+      return;
+    }
+    try {
+      await deleteProfile(activeProfile.id);
+      setShowDeleteConfirm(false);
+      await loadProfiles();
+    } catch (err) {
+      alert(`Failed to delete profile: ${err}`);
+    }
+  }
+
+  async function handleSaveStreamKey() {
+    if (!activeProfile) return;
+    setIsSavingKey(true);
+    setKeySavedMessage(null);
+    try {
+      await setProfileStreamKey(activeProfile.id, streamKey);
+      setKeySavedMessage("Stream key saved securely in OS Credential Manager!");
+      setTimeout(() => setKeySavedMessage(null), 4000);
+      const updated = await listProfiles();
+      setProfiles(updated);
+    } catch (err) {
+      alert(`Failed to save stream key securely: ${err}`);
+    } finally {
+      setIsSavingKey(false);
+    }
+  }
+
   // ── Connection handlers ─────────────────────────────────────────────────
   async function handleTestConnection() {
     setIsTesting(true);
@@ -145,6 +323,8 @@ export default function App() {
         try {
           const scenes = await listScenes(obsConfig);
           setAvailableScenes(scenes);
+          const vs = await getObsVideoSettings(obsConfig);
+          setObsVideoSettingsState(vs);
         } catch {
           // ignore
         }
@@ -162,9 +342,9 @@ export default function App() {
     }
   }
 
-  // ── Composition handlers ────────────────────────────────────────────────
+  // ── Video Composition handlers ──────────────────────────────────────────
   async function handleApplyComposition() {
-    setIsApplying(true);
+    setIsApplyingComposition(true);
     setApplyResult(null);
 
     const payload: ApplyCompositionPayload = {
@@ -190,15 +370,91 @@ export default function App() {
         success: true,
         message: `Composition applied to scene "${sceneName}"!`,
       });
-      setConnectionStatus((prev) => ({
-        ...prev,
-        connected: true,
-        error_message: null,
-      }));
     } catch (err) {
       setApplyResult({ success: false, message: String(err) });
     } finally {
-      setIsApplying(false);
+      setIsApplyingComposition(false);
+    }
+  }
+
+  function handleResetComposition() {
+    setZoom(1.0);
+    setPanX(0);
+    setPanY(0);
+    setHasCrop(false);
+  }
+
+  // ── Quality Settings Staging handlers ───────────────────────────────────
+  function handlePresetChange(preset: "balanced" | "low_bandwidth" | "very_low_bandwidth") {
+    if (!activeProfile) return;
+    let newQuality = { ...activeProfile.quality };
+    if (preset === "balanced") {
+      newQuality = {
+        ...newQuality,
+        output_width: 720,
+        output_height: 1280,
+        fps: 30,
+        video_bitrate_kbps: 2500,
+        audio_bitrate_kbps: 128,
+      };
+    } else if (preset === "low_bandwidth") {
+      newQuality = {
+        ...newQuality,
+        output_width: 720,
+        output_height: 1280,
+        fps: 30,
+        video_bitrate_kbps: 1500,
+        audio_bitrate_kbps: 96,
+      };
+    } else if (preset === "very_low_bandwidth") {
+      newQuality = {
+        ...newQuality,
+        output_width: 540,
+        output_height: 960,
+        fps: 25,
+        video_bitrate_kbps: 800,
+        audio_bitrate_kbps: 64,
+      };
+    }
+
+    const updatedProfile: ProfileSummaryDto = {
+      ...activeProfile,
+      quality: newQuality,
+    };
+    setActiveProfileState(updatedProfile);
+    updateProfile(updatedProfile).catch(console.error);
+  }
+
+  async function handleApplyVideoSettingsToObs() {
+    if (!activeProfile) return;
+    if (streamStatus?.active) {
+      alert("OBS does not support changing video output resolution or FPS while live streaming. Stop the stream first.");
+      return;
+    }
+    setIsApplyingQuality(true);
+    setQualityMessage(null);
+    try {
+      await setObsVideoSettings(obsConfig, {
+        base_width: activeProfile.composition.canvas_width,
+        base_height: activeProfile.composition.canvas_height,
+        output_width: activeProfile.quality.output_width,
+        output_height: activeProfile.quality.output_height,
+        fps_numerator: activeProfile.quality.fps,
+        fps_denominator: 1,
+      });
+      const vs = await getObsVideoSettings(obsConfig);
+      setObsVideoSettingsState(vs);
+      setQualityMessage({
+        success: true,
+        message: `OBS video settings updated to ${activeProfile.quality.output_width}x${activeProfile.quality.output_height} @ ${activeProfile.quality.fps}fps!`,
+      });
+    } catch (err) {
+      setQualityMessage({
+        success: false,
+        message: String(err),
+      });
+    } finally {
+      setIsApplyingQuality(false);
     }
   }
 
@@ -206,17 +462,34 @@ export default function App() {
   async function pollStreamStatus() {
     try {
       const status = await getStreamStatus(obsConfig);
-      setStreamStatus(status);
+      startTransition(() => {
+        setStreamStatus(status);
+      });
     } catch {
-      // silently ignore polling errors — OBS might temporarily disconnect
+      // ignore
     }
   }
 
   async function handleStartStream() {
+    if (!activeProfile) return;
+    if (!activeProfile.server_url.trim()) {
+      setStreamError("Server URL is empty. Please enter your ingest URL from Tango Web Desk.");
+      return;
+    }
+    if (!streamKey.trim()) {
+      setStreamError("Stream Key is empty. Please enter and save your stream key.");
+      return;
+    }
+
     setIsStartingStream(true);
     setStreamError(null);
     try {
-      await startStream({ obs_config: obsConfig, server: rtmpServer, stream_key: streamKey });
+      // Auto-save key to profile credential store if updated
+      await setProfileStreamKey(activeProfile.id, streamKey);
+      await startProfileStream({
+        obs_config: obsConfig,
+        profile_id: activeProfile.id,
+      });
       await pollStreamStatus();
     } catch (err) {
       setStreamError(String(err));
@@ -238,34 +511,28 @@ export default function App() {
     }
   }
 
-  async function handleSetStreamKey() {
-    setStreamError(null);
-    try {
-      await setStreamKeyApi({ obs_config: obsConfig, server: rtmpServer, stream_key: streamKey });
-    } catch (err) {
-      setStreamError(String(err));
-    }
-  }
-
   const isStreaming = streamStatus?.active ?? false;
 
-  // ── Render ──────────────────────────────────────────────────────────────
+  // Congestion percentage meter
+  const congestionPct = streamStatus?.active ? Math.round(streamStatus.congestion * 100) : 0;
+  const congestionColorClass =
+    congestionPct < 25 ? "green" : congestionPct < 55 ? "yellow" : "red";
+
   return (
     <div className="app-layout">
-      {/* ── Header ── */}
+      {/* ── App Header ── */}
       <header className="app-header">
         <div className="header-branding">
           <div className="brand-icon">T</div>
           <div>
             <h1 className="brand-title">Tango Stream Manager</h1>
             <p className="brand-subtitle">
-              Native Video Composition Engine &amp; OBS Bridge
+              Professional Tango Streaming Profiles &amp; Video Composition
             </p>
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-          {/* Live badge */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
           {isStreaming && (
             <div className="status-badge live">
               <span className="pulse-dot" />
@@ -273,11 +540,16 @@ export default function App() {
             </div>
           )}
 
-          {/* OBS connection badge */}
+          {activeProfile && (
+            <div className="status-badge profile-badge">
+              <span>Profile: <strong>{activeProfile.name}</strong></span>
+            </div>
+          )}
+
           {isTesting ? (
             <div className="status-badge testing">
               <span className="pulse-dot" />
-              <span>Testing…</span>
+              <span>Testing OBS…</span>
             </div>
           ) : connectionStatus.connected ? (
             <div className="status-badge connected">
@@ -293,14 +565,57 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── Main grid ── */}
+      {/* ── Profile Toolbar ── */}
+      <div className="profiles-bar">
+        <div className="profile-selector-group">
+          <label className="form-label" style={{ fontWeight: 600 }}>Active Profile:</label>
+          <select
+            className="profile-select"
+            value={activeProfile?.id ?? ""}
+            onChange={(e) => handleSwitchProfile(e.target.value)}
+            disabled={isStreaming}
+          >
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} {p.has_credential ? "🔒" : "⚠️ (No Key)"}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="profile-actions">
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => setShowNewProfileModal(true)}
+            disabled={isStreaming}
+          >
+            + New Profile
+          </button>
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={handleDuplicateProfile}
+            disabled={isStreaming || !activeProfile}
+          >
+            Duplicate
+          </button>
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={() => setShowDeleteConfirm(true)}
+            disabled={isStreaming || profiles.length <= 1}
+          >
+            Delete Profile
+          </button>
+        </div>
+      </div>
+
+      {/* ── Main Dashboard Grid ── */}
       <div className="dashboard-grid">
 
-        {/* ── Left: OBS Connection & Media ── */}
+        {/* ── Left Column: OBS Connection & Scene Target ── */}
         <div className="glass-card">
           <div className="card-title">
-            <span>OBS Connection &amp; Media</span>
-            <span className="badge-tag">WebSocket 5.x</span>
+            <span>OBS Connection &amp; Canvas</span>
+            <span className="badge-tag">WebSocket v5</span>
           </div>
 
           <div className="input-row">
@@ -309,9 +624,7 @@ export default function App() {
               <input
                 className="form-input font-mono"
                 value={obsConfig.host}
-                onChange={(e) =>
-                  setObsConfig({ ...obsConfig, host: e.target.value })
-                }
+                onChange={(e) => setObsConfig({ ...obsConfig, host: e.target.value })}
                 placeholder="127.0.0.1"
               />
             </div>
@@ -321,9 +634,7 @@ export default function App() {
                 className="form-input font-mono"
                 type="number"
                 value={obsConfig.port}
-                onChange={(e) =>
-                  setObsConfig({ ...obsConfig, port: Number(e.target.value) })
-                }
+                onChange={(e) => setObsConfig({ ...obsConfig, port: Number(e.target.value) })}
                 placeholder="4455"
               />
             </div>
@@ -358,28 +669,29 @@ export default function App() {
               <strong>Connection Failed:</strong>
               <span>{connectionStatus.error_message}</span>
               <p className="alert-tip">
-                Ensure OBS Studio is running and WebSocket Server is enabled
-                under <em>Tools → WebSocket Server Settings</em>.
+                Ensure OBS Studio is running with WebSocket Server enabled under <em>Tools → WebSocket Server Settings</em>.
               </p>
+            </div>
+          )}
+
+          {obsVideoSettings && (
+            <div className="alert-box alert-info" style={{ marginTop: "0.25rem" }}>
+              <strong>OBS Base Canvas:</strong>
+              <span>
+                {obsVideoSettings.base_width} × {obsVideoSettings.base_height} (Output: {obsVideoSettings.output_width} × {obsVideoSettings.output_height} @ {Math.round(obsVideoSettings.fps_numerator / (obsVideoSettings.fps_denominator || 1))}fps)
+              </span>
             </div>
           )}
 
           {/* Scene & Source */}
           <div className="card-title" style={{ marginTop: "0.5rem" }}>
-            <span>Target Scene &amp; Video File</span>
+            <span>Target Scene &amp; Media Source</span>
             <span className="badge-tag">Self-Healing</span>
           </div>
 
           <div className="input-row">
             <div className="form-group">
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
-                <label className="form-label" style={{ margin: 0 }}>Scene Name</label>
-                {availableScenes.length > 0 && (
-                  <span style={{ fontSize: "0.75rem", color: "#64748b" }}>
-                    {availableScenes.length} from OBS
-                  </span>
-                )}
-              </div>
+              <label className="form-label">Scene Name</label>
               <input
                 className="form-input"
                 list="obs-scenes-list"
@@ -415,11 +727,13 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── Right: Video Composition ── */}
+        {/* ── Right Column: Video Composition & Safe Pan Geometry ── */}
         <div className="glass-card">
           <div className="card-title">
             <span>Video Composition &amp; Geometry</span>
-            <span className="badge-tag">Domain Model</span>
+            <button className="btn btn-secondary btn-sm" onClick={handleResetComposition}>
+              Reset to 1.0x Cover
+            </button>
           </div>
 
           <div className="input-row">
@@ -430,40 +744,40 @@ export default function App() {
                   className="form-input font-mono"
                   type="number"
                   value={sourceWidth}
-                  onChange={(e) => setSourceWidth(Number(e.target.value))}
+                  onChange={(e) => setSourceWidth(Math.max(1, Number(e.target.value)))}
                 />
                 <input
                   className="form-input font-mono"
                   type="number"
                   value={sourceHeight}
-                  onChange={(e) => setSourceHeight(Number(e.target.value))}
+                  onChange={(e) => setSourceHeight(Math.max(1, Number(e.target.value)))}
                 />
               </div>
             </div>
 
             <div className="form-group">
-              <label className="form-label">Canvas Size (9:16)</label>
+              <label className="form-label">Canvas Frame (9:16)</label>
               <div style={{ display: "flex", gap: "0.5rem" }}>
                 <input
                   className="form-input font-mono"
                   type="number"
                   value={canvasWidth}
-                  onChange={(e) => setCanvasWidth(Number(e.target.value))}
+                  onChange={(e) => setCanvasWidth(Math.max(1, Number(e.target.value)))}
                 />
                 <input
                   className="form-input font-mono"
                   type="number"
                   value={canvasHeight}
-                  onChange={(e) => setCanvasHeight(Number(e.target.value))}
+                  onChange={(e) => setCanvasHeight(Math.max(1, Number(e.target.value)))}
                 />
               </div>
             </div>
           </div>
 
-          {/* Zoom */}
+          {/* Zoom Slider */}
           <div className="slider-group">
             <div className="slider-header">
-              <span>Zoom Scale</span>
+              <span>Zoom Multiplier (1.0x = Baseline Fill/Cover)</span>
               <span className="slider-val">{zoom.toFixed(2)}x</span>
             </div>
             <input
@@ -474,61 +788,67 @@ export default function App() {
               value={zoom}
               onChange={(e) => setZoom(Number(e.target.value))}
             />
+            <span style={{ fontSize: "0.74rem", color: "var(--text-muted)" }}>
+              Cover mode fills the entire frame preserving aspect ratio. Overflow beyond canvas is normal.
+            </span>
           </div>
 
-          {/* Pan */}
+          {/* Dynamic Safe Pan Sliders */}
           <div className="input-row">
             <div className="slider-group">
               <div className="slider-header">
-                <span>Pan X</span>
+                <span>
+                  Pan X {panLimits.x_locked && <span className="badge-tag badge-locked">Locked (0px)</span>}
+                </span>
                 <span className="slider-val">{panX.toFixed(0)}px</span>
               </div>
               <input
                 type="range"
-                min="-300"
-                max="300"
-                step="5"
+                min={panLimits.min_x}
+                max={panLimits.max_x}
+                step="1"
                 value={panX}
+                disabled={panLimits.x_locked}
                 onChange={(e) => setPanX(Number(e.target.value))}
               />
+              <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                Safe range: [{panLimits.min_x.toFixed(0)} .. {panLimits.max_x.toFixed(0)}] px
+              </span>
             </div>
+
             <div className="slider-group">
               <div className="slider-header">
-                <span>Pan Y</span>
+                <span>
+                  Pan Y {panLimits.y_locked && <span className="badge-tag badge-locked">Locked (0px)</span>}
+                </span>
                 <span className="slider-val">{panY.toFixed(0)}px</span>
               </div>
               <input
                 type="range"
-                min="-400"
-                max="400"
-                step="5"
+                min={panLimits.min_y}
+                max={panLimits.max_y}
+                step="1"
                 value={panY}
+                disabled={panLimits.y_locked}
                 onChange={(e) => setPanY(Number(e.target.value))}
               />
+              <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                Safe range: [{panLimits.min_y.toFixed(0)} .. {panLimits.max_y.toFixed(0)}] px
+              </span>
             </div>
           </div>
 
-          {/* Crop toggle */}
+          {/* Normalized Crop */}
           <div className="form-group" style={{ marginTop: "0.25rem" }}>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "0.5rem",
-                cursor: "pointer",
-              }}
-            >
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
               <input
                 type="checkbox"
                 checked={hasCrop}
                 onChange={(e) => setHasCrop(e.target.checked)}
                 style={{ width: "16px", height: "16px" }}
               />
-              <span
-                className="form-label"
-                style={{ color: "var(--text-primary)" }}
-              >
-                Enable Normalized Crop Region
+              <span className="form-label" style={{ color: "var(--text-primary)" }}>
+                Enable Source Crop Region (OBS integer pixel rounding)
               </span>
             </label>
           </div>
@@ -537,16 +857,14 @@ export default function App() {
             <div className="input-row">
               <div className="slider-group">
                 <div className="slider-header">
-                  <span>Left / Right Crop</span>
-                  <span className="slider-val">
-                    {(cropLeft * 100).toFixed(0)}%
-                  </span>
+                  <span>Horizontal Crop (L/R)</span>
+                  <span className="slider-val">{(cropLeft * 100).toFixed(0)}%</span>
                 </div>
                 <input
                   type="range"
                   min="0.0"
                   max="0.45"
-                  step="0.05"
+                  step="0.02"
                   value={cropLeft}
                   onChange={(e) => {
                     const v = Number(e.target.value);
@@ -558,16 +876,14 @@ export default function App() {
 
               <div className="slider-group">
                 <div className="slider-header">
-                  <span>Top / Bottom Crop</span>
-                  <span className="slider-val">
-                    {(cropTop * 100).toFixed(0)}%
-                  </span>
+                  <span>Vertical Crop (T/B)</span>
+                  <span className="slider-val">{(cropTop * 100).toFixed(0)}%</span>
                 </div>
                 <input
                   type="range"
                   min="0.0"
                   max="0.45"
-                  step="0.05"
+                  step="0.02"
                   value={cropTop}
                   onChange={(e) => {
                     const v = Number(e.target.value);
@@ -582,128 +898,289 @@ export default function App() {
           <button
             className="btn btn-primary"
             onClick={handleApplyComposition}
-            disabled={isApplying}
+            disabled={isApplyingComposition || !connectionStatus.connected}
             style={{ marginTop: "auto" }}
           >
-            {isApplying ? "Applying to OBS…" : "Apply Video Composition to OBS"}
+            {isApplyingComposition ? "Applying to OBS…" : "Apply Video Composition to OBS"}
           </button>
 
           {applyResult && (
-            <div
-              className={`alert-box ${
-                applyResult.success ? "alert-success" : "alert-error"
-              }`}
-            >
+            <div className={`alert-box ${applyResult.success ? "alert-success" : "alert-error"}`}>
               <strong>{applyResult.success ? "Success" : "Error"}:</strong>
               <span>{applyResult.message}</span>
             </div>
           )}
         </div>
 
-        {/* ── Full-width: Streaming Control ── */}
-        <div className="glass-card streaming-card">
+        {/* ── Full-Width: Streaming Quality (Profile-Bound) ── */}
+        <div className="glass-card full-width-card">
           <div className="card-title">
-            <span>Live Stream Control</span>
-            <span className="badge-tag">RTMP</span>
+            <span>Streaming Quality &amp; Presets (Profile: {activeProfile?.name ?? "Default"})</span>
+            <span className="badge-tag">Encoding</span>
           </div>
 
-          {/* Stream status bar */}
-          {streamStatus && (
-            <div className={`stream-status-bar ${streamStatus.active ? "live" : "offline"}`}>
-              <div className="stream-stat">
-                <span className="stat-label">Status</span>
-                <span className={`stat-value ${streamStatus.active ? "text-live" : "text-offline"}`}>
-                  {streamStatus.active ? "🔴 LIVE" : "⚫ Offline"}
-                </span>
+          {/* Presets Bar */}
+          <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", alignItems: "center" }}>
+            <span className="form-label" style={{ fontWeight: 600 }}>Quick Preset:</span>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => handlePresetChange("balanced")}
+            >
+              Standard Balanced (720p @ 2500 Kbps)
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => handlePresetChange("low_bandwidth")}
+            >
+              Low Bandwidth (720p @ 1500 Kbps)
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => handlePresetChange("very_low_bandwidth")}
+            >
+              Very Low Bandwidth (540p @ 800 Kbps)
+            </button>
+          </div>
+
+          <div className="input-row-3">
+            <div className="form-group">
+              <label className="form-label">Output Resolution (9:16 Portrait)</label>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <input
+                  className="form-input font-mono"
+                  type="number"
+                  value={activeProfile?.quality.output_width ?? 720}
+                  onChange={(e) => {
+                    if (!activeProfile) return;
+                    const w = Math.max(1, Number(e.target.value));
+                    const updated = {
+                      ...activeProfile,
+                      quality: { ...activeProfile.quality, output_width: w },
+                    };
+                    setActiveProfileState(updated);
+                    updateProfile(updated).catch(console.error);
+                  }}
+                  disabled={isStreaming}
+                />
+                <input
+                  className="form-input font-mono"
+                  type="number"
+                  value={activeProfile?.quality.output_height ?? 1280}
+                  onChange={(e) => {
+                    if (!activeProfile) return;
+                    const h = Math.max(1, Number(e.target.value));
+                    const updated = {
+                      ...activeProfile,
+                      quality: { ...activeProfile.quality, output_height: h },
+                    };
+                    setActiveProfileState(updated);
+                    updateProfile(updated).catch(console.error);
+                  }}
+                  disabled={isStreaming}
+                />
               </div>
-              {streamStatus.active && (
-                <>
-                  <div className="stream-stat">
-                    <span className="stat-label">Uptime</span>
-                    <span className="stat-value font-mono">
-                      {streamStatus.timecode ?? "—"}
-                    </span>
-                  </div>
-                  <div className="stream-stat">
-                    <span className="stat-label">Bitrate</span>
-                    <span className="stat-value font-mono">
-                      {streamStatus.kbits_per_sec != null
-                        ? `${streamStatus.kbits_per_sec} Kbps`
-                        : "—"}
-                    </span>
-                  </div>
-                  <div className="stream-stat">
-                    <span className="stat-label">Dropped</span>
-                    <span className="stat-value font-mono">
-                      {streamStatus.dropped_frames ?? 0} frames
-                    </span>
-                  </div>
-                </>
-              )}
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Target Framerate (FPS)</label>
+              <select
+                className="form-input font-mono"
+                value={activeProfile?.quality.fps ?? 30}
+                onChange={(e) => {
+                  if (!activeProfile) return;
+                  const fps = Number(e.target.value);
+                  const updated = {
+                    ...activeProfile,
+                    quality: { ...activeProfile.quality, fps },
+                  };
+                  setActiveProfileState(updated);
+                  updateProfile(updated).catch(console.error);
+                }}
+                disabled={isStreaming}
+              >
+                <option value={60}>60 FPS</option>
+                <option value={30}>30 FPS (Standard)</option>
+                <option value={25}>25 FPS (Low Bandwidth)</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Video Bitrate (Kbps)</label>
+              <input
+                className="form-input font-mono"
+                type="number"
+                step="100"
+                value={activeProfile?.quality.video_bitrate_kbps ?? 2500}
+                onChange={(e) => {
+                  if (!activeProfile) return;
+                  const v = Number(e.target.value);
+                  const updated = {
+                    ...activeProfile,
+                    quality: { ...activeProfile.quality, video_bitrate_kbps: v },
+                  };
+                  setActiveProfileState(updated);
+                  updateProfile(updated).catch(console.error);
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="input-row-3">
+            <div className="form-group">
+              <label className="form-label">Audio Bitrate (Kbps)</label>
+              <select
+                className="form-input font-mono"
+                value={activeProfile?.quality.audio_bitrate_kbps ?? 128}
+                onChange={(e) => {
+                  if (!activeProfile) return;
+                  const v = Number(e.target.value);
+                  const updated = {
+                    ...activeProfile,
+                    quality: { ...activeProfile.quality, audio_bitrate_kbps: v },
+                  };
+                  setActiveProfileState(updated);
+                  updateProfile(updated).catch(console.error);
+                }}
+              >
+                <option value={160}>160 Kbps (High)</option>
+                <option value={128}>128 Kbps (Balanced)</option>
+                <option value={96}>96 Kbps (Low)</option>
+                <option value={64}>64 Kbps (Voice only)</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Rate Control &amp; Keyframe</label>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <input
+                  className="form-input font-mono"
+                  value="CBR"
+                  readOnly
+                  title="CBR rate control is recommended for stable RTMP streaming"
+                  style={{ width: "80px" }}
+                />
+                <input
+                  className="form-input font-mono"
+                  value="2s Keyframe"
+                  readOnly
+                  style={{ flex: 1 }}
+                />
+              </div>
+            </div>
+
+            <div className="form-group" style={{ justifyContent: "flex-end" }}>
+              <button
+                className="btn btn-secondary"
+                onClick={handleApplyVideoSettingsToObs}
+                disabled={!connectionStatus.connected || isStreaming || isApplyingQuality}
+                title={
+                  isStreaming
+                    ? "OBS requires stopping the live stream to change output resolution."
+                    : "Stage output dimensions and FPS in OBS"
+                }
+              >
+                {isApplyingQuality ? "Applying…" : "Apply Output Settings to OBS"}
+              </button>
+            </div>
+          </div>
+
+          {isStreaming && (
+            <div className="alert-box alert-warning">
+              <strong>Live Stream Active:</strong>
+              <span>
+                Output resolution and framerate cannot be changed while streaming. Bitrate adjustments can be applied or managed via OBS dynamic bitrate.
+              </span>
             </div>
           )}
 
-          {/* RTMP settings */}
-          <div className="stream-settings-row">
-            <div className="form-group" style={{ flex: "1 1 300px" }}>
-              <label className="form-label">RTMP Server URL</label>
+          {qualityMessage && (
+            <div className={`alert-box ${qualityMessage.success ? "alert-success" : "alert-error"}`}>
+              <span>{qualityMessage.message}</span>
+            </div>
+          )}
+        </div>
+
+        {/* ── Full-Width: Tango Live Stream Control & Health Metrics ── */}
+        <div className="glass-card full-width-card">
+          <div className="card-title">
+            <span>Tango Broadcast Control &amp; Live Stream Health</span>
+            <span className="badge-tag">{activeProfile?.service_type === "tango" ? "Tango RTMP" : "Custom RTMP"}</span>
+          </div>
+
+          {/* Official Tango Guidance Banner */}
+          <div className="alert-box alert-info">
+            <strong>Tango Web Desk Connection Instructions:</strong>
+            <span>
+              1. Open Tango Web Desk on your browser (<code className="font-mono">tango.me</code>) &rarr; click <strong>Start Stream</strong> &rarr; choose <strong>OBS Stream</strong>.<br />
+              2. Copy the official <strong>RTMP Server URL</strong> and <strong>Stream Key</strong> provided and save them below. Stream keys are stored encrypted in your operating system&apos;s credential vault.
+            </span>
+          </div>
+
+          {/* RTMP Destination & Secret Key */}
+          <div className="input-row">
+            <div className="form-group">
+              <label className="form-label">RTMP Ingest Server URL</label>
               <input
                 className="form-input font-mono"
-                value={rtmpServer}
-                onChange={(e) => setRtmpServer(e.target.value)}
-                placeholder="rtmp://live.twitch.tv/live"
+                value={activeProfile?.server_url ?? ""}
+                onChange={(e) => {
+                  if (!activeProfile) return;
+                  const updated = { ...activeProfile, server_url: e.target.value };
+                  setActiveProfileState(updated);
+                  updateProfile(updated).catch(console.error);
+                }}
+                placeholder="e.g. rtmp://live.tango.me/stream"
                 disabled={isStreaming}
               />
             </div>
 
-            <div className="form-group" style={{ flex: "1 1 260px" }}>
-              <label className="form-label">Stream Key</label>
-              <div style={{ display: "flex", gap: "0.4rem" }}>
+            <div className="form-group">
+              <label className="form-label">
+                Profile Stream Key {activeProfile?.has_credential && <span style={{ color: "#34d399" }}>● (Stored Securely)</span>}
+              </label>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
                 <input
                   className="form-input font-mono"
                   type={showStreamKey ? "text" : "password"}
                   value={streamKey}
                   onChange={(e) => setStreamKey(e.target.value)}
-                  placeholder="live_xxxxxxxxxxxxxxxx"
+                  placeholder="Paste your Tango stream key"
                   disabled={isStreaming}
                   style={{ flex: 1 }}
                 />
                 <button
                   className="btn btn-icon"
                   onClick={() => setShowStreamKey((v) => !v)}
-                  title={showStreamKey ? "Hide key" : "Show key"}
+                  title={showStreamKey ? "Hide key" : "Reveal key"}
                 >
                   {showStreamKey ? "🙈" : "👁"}
                 </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={handleSaveStreamKey}
+                  disabled={isStreaming || !streamKey || isSavingKey}
+                >
+                  {isSavingKey ? "Saving…" : "Save Key"}
+                </button>
               </div>
             </div>
-
-            {/* Update key without toggling stream */}
-            {!isStreaming && (
-              <button
-                className="btn btn-secondary"
-                onClick={handleSetStreamKey}
-                disabled={!connectionStatus.connected || !streamKey}
-                style={{ alignSelf: "flex-end" }}
-              >
-                Save Key
-              </button>
-            )}
           </div>
 
-          {/* Start / Stop buttons */}
-          <div className="stream-actions">
+          {keySavedMessage && (
+            <div className="alert-box alert-success">
+              <span>{keySavedMessage}</span>
+            </div>
+          )}
+
+          {/* Stream Action Buttons */}
+          <div style={{ display: "flex", gap: "1rem", alignItems: "center", marginTop: "0.5rem" }}>
             {!isStreaming ? (
               <button
                 className="btn btn-live"
                 onClick={handleStartStream}
-                disabled={
-                  isStartingStream ||
-                  !connectionStatus.connected ||
-                  !streamKey.trim()
-                }
+                disabled={isStartingStream || !connectionStatus.connected || !streamKey.trim()}
               >
-                {isStartingStream ? "Starting…" : "▶ Go Live"}
+                {isStartingStream ? "Starting Stream…" : "▶ Go Live on Tango"}
               </button>
             ) : (
               <button
@@ -711,9 +1188,15 @@ export default function App() {
                 onClick={handleStopStream}
                 disabled={isStoppingStream}
               >
-                {isStoppingStream ? "Stopping…" : "⏹ End Stream"}
+                {isStoppingStream ? "Stopping…" : "⏹ End Broadcast"}
               </button>
             )}
+
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
+              {isStreaming
+                ? "Broadcast is live. Resolution is locked."
+                : "Ensure video composition and destination settings are ready before broadcasting."}
+            </div>
           </div>
 
           {streamError && (
@@ -722,8 +1205,172 @@ export default function App() {
               <span>{streamError}</span>
             </div>
           )}
+
+          {/* Real-Time Stream Health Dashboard */}
+          {streamStatus && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", marginTop: "0.75rem" }}>
+              <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                Live Stream Metrics &amp; Diagnostic Counters
+              </div>
+
+              <div className="health-grid">
+                <div className="health-stat">
+                  <span className="health-stat-label">Status</span>
+                  <span className="health-stat-value" style={{ color: streamStatus.active ? "#f87171" : "#6e7681" }}>
+                    {streamStatus.active ? (streamStatus.reconnecting ? "🟡 Reconnecting" : "🔴 LIVE") : "⚫ Offline"}
+                  </span>
+                </div>
+
+                <div className="health-stat">
+                  <span className="health-stat-label">Uptime</span>
+                  <span className="health-stat-value font-mono">
+                    {streamStatus.timecode ?? "—"}
+                  </span>
+                </div>
+
+                <div className="health-stat">
+                  <span className="health-stat-label">Output Bitrate</span>
+                  <span className="health-stat-value font-mono">
+                    {streamStatus.kbits_per_sec != null ? `${streamStatus.kbits_per_sec} Kbps` : "—"}
+                  </span>
+                </div>
+
+                <div className="health-stat">
+                  <span className="health-stat-label">Network Congestion</span>
+                  <span className="health-stat-value font-mono">
+                    {congestionPct}%
+                  </span>
+                  <div className="meter-bar-container">
+                    <div
+                      className={`meter-fill ${congestionColorClass}`}
+                      style={{ width: `${Math.min(100, Math.max(5, congestionPct))}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="health-stat">
+                  <span className="health-stat-label">Network Dropped</span>
+                  <span className="health-stat-value font-mono">
+                    {streamStatus.dropped_frames} frames
+                  </span>
+                  <span className="health-stat-sub">Output buffer</span>
+                </div>
+
+                <div className="health-stat">
+                  <span className="health-stat-label">Render Skipped</span>
+                  <span className="health-stat-value font-mono">
+                    {streamStatus.render_skipped_frames} frames
+                  </span>
+                  <span className="health-stat-sub">GPU/CPU lag</span>
+                </div>
+
+                <div className="health-stat">
+                  <span className="health-stat-label">OBS CPU / FPS</span>
+                  <span className="health-stat-value font-mono">
+                    {streamStatus.cpu_usage.toFixed(1)}% / {Math.round(streamStatus.active_fps)} fps
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* ── Modal: Create New Profile ── */}
+      {showNewProfileModal && (
+        <div className="modal-overlay" onClick={() => setShowNewProfileModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Create New Streaming Profile</h3>
+              <button className="btn btn-icon" onClick={() => setShowNewProfileModal(false)}>✕</button>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Profile Name</label>
+              <input
+                className="form-input"
+                value={newProfileName}
+                onChange={(e) => setNewProfileName(e.target.value)}
+                placeholder="e.g. Tango Portrait High-Q"
+                autoFocus
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Starting Quality Preset</label>
+              <select
+                className="form-input"
+                value={newProfilePreset}
+                onChange={(e) => setNewProfilePreset(e.target.value)}
+              >
+                <option value="balanced">Standard Balanced (720x1280 @ 30fps, 2500 Kbps)</option>
+                <option value="low_bandwidth">Low Bandwidth (720x1280 @ 30fps, 1500 Kbps)</option>
+                <option value="very_low_bandwidth">Very Low Bandwidth (540x960 @ 25fps, 800 Kbps)</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Tango RTMP Ingest URL (Optional)</label>
+              <input
+                className="form-input font-mono"
+                value={newProfileServer}
+                onChange={(e) => setNewProfileServer(e.target.value)}
+                placeholder="e.g. rtmp://live.tango.me/stream"
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Stream Key (Saved to OS Keyring)</label>
+              <input
+                className="form-input font-mono"
+                type="password"
+                value={newProfileKey}
+                onChange={(e) => setNewProfileKey(e.target.value)}
+                placeholder="Paste Tango stream key"
+              />
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setShowNewProfileModal(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={handleCreateProfile}
+                disabled={!newProfileName.trim()}
+              >
+                Create Profile
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Modal: Delete Profile Confirmation ── */}
+      {showDeleteConfirm && (
+        <div className="modal-overlay" onClick={() => setShowDeleteConfirm(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Delete Profile</h3>
+              <button className="btn btn-icon" onClick={() => setShowDeleteConfirm(false)}>✕</button>
+            </div>
+
+            <p style={{ color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              Are you sure you want to delete profile <strong>&quot;{activeProfile?.name}&quot;</strong>?
+              Its stored stream credentials in the OS Keyring will also be permanently removed.
+            </p>
+
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setShowDeleteConfirm(false)}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" onClick={handleDeleteProfile}>
+                Confirm Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -43,14 +43,14 @@ impl ObsVideoOutput {
 
     /// Spawn a dedicated OS thread with its own Tokio runtime and run the
     /// given closure (which receives a cloned `ObsVideoOutput`) to completion.
-    ///
-    /// This is the only safe way to call async OBS methods from a **sync**
-    /// trait impl when the caller may already be inside an async runtime
-    /// (Tauri, tests, …). Creating the runtime inside a fresh thread avoids
-    /// the Tokio "drop runtime in async context" panic entirely.
     pub(crate) fn run_sync<F, T, E>(&self, f: F) -> Result<T, E>
     where
-        F: FnOnce(ObsVideoOutput) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send>> + Send + 'static,
+        F: FnOnce(
+                ObsVideoOutput,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send>>
+            + Send
+            + 'static,
         T: Send + 'static,
         E: Send + 'static,
     {
@@ -129,7 +129,7 @@ impl ObsVideoOutput {
     /// 1. Scene exists (created if missing).
     /// 2. Input exists with `local_file` set to `source_path` (created as ffmpeg_source if missing).
     /// 3. Input is present in the scene as a scene item (added if missing).
-    /// 4. Transform (crop + fill + pan + zoom) is applied.
+    /// 4. Transform (crop + fill + pan + zoom) is applied with safe boundary clamping.
     /// 5. Transform is queried back to verify.
     pub async fn apply_video_composition_async(
         &self,
@@ -287,10 +287,7 @@ impl VideoOutputPort for ObsVideoOutput {
 
 /// Build a full OBS scene item transform from a `VideoOutputRequest`.
 ///
-/// The adapter is idempotent: every call produces the same transform for
-/// the same request, independent of any prior OBS state. This matches the
-/// architectural rule that `VideoComposition` (domain) is the source of
-/// truth, and OBS is a downstream executor.
+/// Ensures safe boundary clamping so no uncovered gap can appear in the target canvas.
 fn build_scene_item_transform(
     request: &VideoOutputRequest,
 ) -> Result<SceneItemTransform, VideoOutputError> {
@@ -301,11 +298,6 @@ fn build_scene_item_transform(
 
     // Crop is represented in the domain as the fraction removed from
     // each side. OBS also expects the removed pixel count on each side.
-    //
-    // IMPORTANT:
-    // The visible content dimensions after crop are the dimensions that
-    // must be used for Fill/Zoom geometry. OBS subtracts crop pixels from
-    // the source dimensions before applying the scene-item scale.
     let (crop, visible_size) = match request.composition.crop.as_ref() {
         Some(c) => {
             let left = (c.left * source_width).round() as u32;
@@ -314,7 +306,6 @@ fn build_scene_item_transform(
             let bottom = (c.bottom * source_height).round() as u32;
 
             let visible_width = source_width - f64::from(left + right);
-
             let visible_height = source_height - f64::from(top + bottom);
 
             if visible_width <= 0.0 || visible_height <= 0.0 {
@@ -345,21 +336,34 @@ fn build_scene_item_transform(
         ),
     };
 
-    // Geometry is based on the visible post-crop content.
-    // This keeps Fill correct after a crop is committed.
+    // Calculate safe pan boundaries for this visible size, canvas, and zoom
+    let pan_limits = video_composition::calculate_safe_canvas_pan_limits(
+        visible_size,
+        VcSize::new(canvas_width, canvas_height),
+        request.composition.transform.zoom,
+    )
+    .map_err(|e| VideoOutputError::InvalidRequest(format!("invalid composition: {e}")))?;
+
+    // Clamp pan offsets so video always completely covers canvas
+    let clamped_pan = pan_limits.clamp(
+        request.composition.transform.pan_x,
+        request.composition.transform.pan_y,
+    );
+
+    // Geometry is based on visible post-crop content with clamped pan
     let geometry = video_composition::calculate_geometry(
         visible_size,
         VcSize::new(canvas_width, canvas_height),
         VcTransform {
             zoom: request.composition.transform.zoom,
-            pan_x: request.composition.transform.pan_x,
-            pan_y: request.composition.transform.pan_y,
+            pan_x: clamped_pan.x,
+            pan_y: clamped_pan.y,
         },
     )
     .map_err(|e| VideoOutputError::InvalidRequest(format!("invalid composition transform: {e}")))?;
 
-    let center_x = canvas_width / 2.0 + request.composition.transform.pan_x;
-    let center_y = canvas_height / 2.0 + request.composition.transform.pan_y;
+    let center_x = canvas_width / 2.0 + clamped_pan.x;
+    let center_y = canvas_height / 2.0 + clamped_pan.y;
 
     Ok(SceneItemTransform {
         crop: Some(crop),
@@ -411,7 +415,6 @@ mod transform_tests {
         (a - b).abs() < 1e-4
     }
 
-    // fill_scale for source 568x762 in canvas 720x1280 = 1280/762.
     fn fill_scale() -> f32 {
         (1280.0_f64 / 762.0) as f32
     }
@@ -446,9 +449,6 @@ mod transform_tests {
         let t = build_scene_item_transform(&req).unwrap();
         let crop = t.crop.unwrap();
 
-        // source = 568x762
-        // left  = round(0.10 * 568) = round(56.8) = 57
-        // top   = round(0.10 * 762) = round(76.2) = 76
         assert_eq!(crop.left, Some(57));
         assert_eq!(crop.top, Some(76));
         assert_eq!(crop.right, Some(57));
@@ -458,86 +458,73 @@ mod transform_tests {
     #[test]
     fn crop_fill_uses_visible_dimensions() {
         let mut req = base_request();
-
         req.composition.crop = CropRegion::new(0.10, 0.10, 0.10, 0.10);
 
         let t = build_scene_item_transform(&req).unwrap();
-
         let scale = t.scale.expect("scale must be present");
 
-        // source = 568x762
-        //
-        // Rounded OBS crop:
-        // left/right = 57
-        // top/bottom = 76
-        //
-        // Visible source:
-        // 454x610
-        //
-        // Fill scale is therefore:
-        // max(720/454, 1280/610)
-        // = 2.0983606557...
         let expected = (1280.0_f64 / 610.0) as f32;
-
         assert!(approx(scale.x.unwrap(), expected));
-
         assert!(approx(scale.y.unwrap(), expected));
     }
 
     #[test]
     fn crop_fill_then_zoom_multiplies_visible_geometry() {
         let mut req = base_request();
-
         req.composition.crop = CropRegion::new(0.10, 0.10, 0.10, 0.10);
-
         req.composition.transform.zoom = 1.5;
 
         let t = build_scene_item_transform(&req).unwrap();
-
         let scale = t.scale.expect("scale must be present");
 
         let fill = 1280.0_f64 / 610.0;
-
         let expected = (fill * 1.5) as f32;
 
         assert!(approx(scale.x.unwrap(), expected));
-
         assert!(approx(scale.y.unwrap(), expected));
     }
 
     #[test]
     fn crop_fill_keeps_pan_as_canvas_center_offset() {
         let mut req = base_request();
-
         req.composition.crop = CropRegion::new(0.10, 0.10, 0.10, 0.10);
-
+        req.composition.transform.zoom = 1.2;
         req.composition.transform.pan_x = -70.0;
-
         req.composition.transform.pan_y = 25.0;
 
         let t = build_scene_item_transform(&req).unwrap();
-
         let position = t.position.expect("position must be present");
 
         assert!(approx(position.x.unwrap(), 290.0));
-
         assert!(approx(position.y.unwrap(), 665.0));
     }
 
     #[test]
-    fn pan_shifts_position_without_changing_scale() {
+    fn pan_shifts_position_on_overflow_axis() {
         let mut req = base_request();
-        req.composition.transform.pan_y = 100.0;
+        // Source 568x762 in 720x1280 has horizontal extra width of 234px ([-117, 117])
+        req.composition.transform.pan_x = 50.0;
 
         let t = build_scene_item_transform(&req).unwrap();
-
         let pos = t.position.unwrap();
-        assert!(approx(pos.x.unwrap(), 360.0));
-        assert!(approx(pos.y.unwrap(), 740.0));
+        assert!(approx(pos.x.unwrap(), 410.0));
+        assert!(approx(pos.y.unwrap(), 640.0));
+    }
 
-        let sc = t.scale.unwrap();
-        assert!(approx(sc.x.unwrap(), fill_scale()));
-        assert!(approx(sc.y.unwrap(), fill_scale()));
+    #[test]
+    fn pan_is_safely_clamped_to_prevent_gaps() {
+        let mut req = base_request();
+        // Request an excessive pan that would expose black bars
+        req.composition.transform.pan_x = 9999.0;
+        req.composition.transform.pan_y = 9999.0;
+
+        let t = build_scene_item_transform(&req).unwrap();
+        let pos = t.position.unwrap();
+
+        // Max safe X offset is ~117.0604 -> position X is ~477.0604
+        assert!(pos.x.unwrap() <= 477.1);
+        // Vertical axis has 0 overflow at zoom 1.0, so pan Y clamped to 0 -> position Y is exactly 640.0
+        assert!(approx(pos.y.unwrap(), 640.0));
     }
 
     #[test]
