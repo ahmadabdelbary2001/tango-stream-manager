@@ -1,6 +1,6 @@
-﻿pub mod obs_video_output;
+pub mod obs_video_output;
 
-pub use obs_video_output::ObsVideoOutput;
+pub use obs_video_output::{ObsVersionInfo, ObsVideoOutput};
 
 #[cfg(test)]
 mod tests {

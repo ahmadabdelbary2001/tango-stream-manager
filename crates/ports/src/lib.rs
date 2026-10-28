@@ -57,6 +57,9 @@ pub enum VideoOutputError {
     #[error("video output backend is unavailable: {0}")]
     BackendUnavailable(String),
 
+    #[error("authentication with video output backend failed: {0}")]
+    AuthenticationFailed(String),
+
     #[error("video output backend failed: {0}")]
     Backend(String),
 }

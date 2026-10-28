@@ -156,6 +156,7 @@ pub enum CompositionError {
     InvalidSourceSize,
     InvalidCanvasSize,
     InvalidZoom,
+    InvalidPan,
     InvalidCropFrame,
     InvalidAspectRatio,
     CropFrameOutsideVideo,
@@ -165,16 +166,19 @@ impl fmt::Display for CompositionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidSourceSize => {
-                write!(f, "source size must be greater than zero")
+                write!(f, "source size must be greater than zero and finite")
             }
             Self::InvalidCanvasSize => {
-                write!(f, "canvas size must be greater than zero")
+                write!(f, "canvas size must be greater than zero and finite")
             }
             Self::InvalidZoom => {
-                write!(f, "zoom must be greater than zero")
+                write!(f, "zoom must be greater than zero and finite")
+            }
+            Self::InvalidPan => {
+                write!(f, "pan offsets must be finite numbers")
             }
             Self::InvalidCropFrame => {
-                write!(f, "crop frame must have positive dimensions")
+                write!(f, "crop frame must have positive and finite dimensions")
             }
             Self::InvalidAspectRatio => {
                 write!(f, "aspect ratio must be a finite value greater than zero")
@@ -192,7 +196,11 @@ impl fmt::Display for CompositionError {
 impl std::error::Error for CompositionError {}
 
 fn validate_size(size: Size) -> Result<(), CompositionError> {
-    if size.width <= 0.0 || size.height <= 0.0 {
+    if !size.width.is_finite()
+        || size.width <= 0.0
+        || !size.height.is_finite()
+        || size.height <= 0.0
+    {
         return Err(CompositionError::InvalidSourceSize);
     }
 
@@ -200,7 +208,11 @@ fn validate_size(size: Size) -> Result<(), CompositionError> {
 }
 
 fn validate_canvas(canvas: Size) -> Result<(), CompositionError> {
-    if canvas.width <= 0.0 || canvas.height <= 0.0 {
+    if !canvas.width.is_finite()
+        || canvas.width <= 0.0
+        || !canvas.height.is_finite()
+        || canvas.height <= 0.0
+    {
         return Err(CompositionError::InvalidCanvasSize);
     }
 
@@ -208,7 +220,13 @@ fn validate_canvas(canvas: Size) -> Result<(), CompositionError> {
 }
 
 fn validate_crop_frame(crop_frame: Rect) -> Result<(), CompositionError> {
-    if crop_frame.width <= 0.0 || crop_frame.height <= 0.0 {
+    if !crop_frame.x.is_finite()
+        || !crop_frame.y.is_finite()
+        || !crop_frame.width.is_finite()
+        || crop_frame.width <= 0.0
+        || !crop_frame.height.is_finite()
+        || crop_frame.height <= 0.0
+    {
         return Err(CompositionError::InvalidCropFrame);
     }
 
@@ -270,8 +288,12 @@ pub fn calculate_geometry(
 ) -> Result<Geometry, CompositionError> {
     let fill_scale = calculate_fill_scale(source, canvas)?;
 
-    if transform.zoom <= 0.0 {
+    if !transform.zoom.is_finite() || transform.zoom <= 0.0 {
         return Err(CompositionError::InvalidZoom);
+    }
+
+    if !transform.pan_x.is_finite() || !transform.pan_y.is_finite() {
+        return Err(CompositionError::InvalidPan);
     }
 
     let effective_scale = fill_scale * transform.zoom;
@@ -370,7 +392,7 @@ pub fn calculate_pan_limits(
 ) -> Result<PanLimits, CompositionError> {
     validate_crop_frame(crop_frame)?;
 
-    if zoom <= 0.0 {
+    if !zoom.is_finite() || zoom <= 0.0 {
         return Err(CompositionError::InvalidZoom);
     }
 
@@ -610,6 +632,95 @@ mod crop_frame_tests {
         assert_eq!(
             calculate_centered_crop_frame(canvas(), 0.0, Size::new(360.0, 640.0,),).unwrap_err(),
             CompositionError::InvalidAspectRatio
+        );
+    }
+}
+
+#[cfg(test)]
+mod edge_case_tests {
+    use super::*;
+
+    #[test]
+    fn nan_and_infinite_sizes_are_rejected() {
+        let canvas = Size::new(720.0, 1280.0);
+        let valid_source = Size::new(1920.0, 1080.0);
+
+        assert_eq!(
+            calculate_fill_scale(Size::new(f64::NAN, 1080.0), canvas).unwrap_err(),
+            CompositionError::InvalidSourceSize
+        );
+        assert_eq!(
+            calculate_fill_scale(Size::new(1920.0, f64::INFINITY), canvas).unwrap_err(),
+            CompositionError::InvalidSourceSize
+        );
+        assert_eq!(
+            calculate_fill_scale(valid_source, Size::new(f64::NAN, 1280.0)).unwrap_err(),
+            CompositionError::InvalidCanvasSize
+        );
+        assert_eq!(
+            calculate_fill_scale(valid_source, Size::new(720.0, -100.0)).unwrap_err(),
+            CompositionError::InvalidCanvasSize
+        );
+    }
+
+    #[test]
+    fn nan_and_infinite_transforms_are_rejected() {
+        let source = Size::new(1920.0, 1080.0);
+        let canvas = Size::new(720.0, 1280.0);
+
+        assert_eq!(
+            calculate_geometry(
+                source,
+                canvas,
+                VideoTransform {
+                    zoom: f64::NAN,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                }
+            )
+            .unwrap_err(),
+            CompositionError::InvalidZoom
+        );
+
+        assert_eq!(
+            calculate_geometry(
+                source,
+                canvas,
+                VideoTransform {
+                    zoom: 1.0,
+                    pan_x: f64::INFINITY,
+                    pan_y: 0.0,
+                }
+            )
+            .unwrap_err(),
+            CompositionError::InvalidPan
+        );
+
+        assert_eq!(
+            calculate_geometry(
+                source,
+                canvas,
+                VideoTransform {
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: f64::NAN,
+                }
+            )
+            .unwrap_err(),
+            CompositionError::InvalidPan
+        );
+    }
+
+    #[test]
+    fn nan_crop_frame_is_rejected() {
+        let source = Size::new(1920.0, 1080.0);
+        let canvas = Size::new(720.0, 1280.0);
+        let transform = VideoTransform::default();
+
+        let nan_frame = Rect::new(0.0, 0.0, f64::NAN, 500.0);
+        assert_eq!(
+            preview_to_source(source, canvas, transform, nan_frame).unwrap_err(),
+            CompositionError::InvalidCropFrame
         );
     }
 }

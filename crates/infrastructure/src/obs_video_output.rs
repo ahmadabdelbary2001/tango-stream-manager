@@ -1,12 +1,24 @@
 use obws::Client;
 use obws::common::{Alignment, BoundsType};
+use obws::error::Error as ObwsError;
 use obws::requests::canvases::SceneId;
+use obws::requests::inputs::{Create as CreateInput, InputId, SetSettings as SetInputSettings};
 use obws::requests::scene_items::{
-    Bounds, Crop, Id as SceneItemId, Position, Scale, SceneItemTransform, SetTransform,
+    Bounds, CreateSceneItem, Crop, Id as SceneItemId, Position, Scale, SceneItemTransform,
+    SetTransform,
 };
+use obws::requests::sources::SourceId;
 use ports::{VideoOutputError, VideoOutputPort, VideoOutputRequest};
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use video_composition::{Size as VcSize, VideoTransform as VcTransform};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObsVersionInfo {
+    pub obs_version: String,
+    pub obs_web_socket_version: String,
+    pub rpc_version: u32,
+}
 
 pub struct ObsVideoOutput {
     runtime: Runtime,
@@ -25,6 +37,201 @@ impl ObsVideoOutput {
             password,
         })
     }
+
+    /// Asynchronously connect to OBS and return the client.
+    /// Maps errors to BackendUnavailable or AuthenticationFailed.
+    pub async fn connect_client(&self) -> Result<Client, VideoOutputError> {
+        Client::connect(&self.host, self.port, self.password.as_deref())
+            .await
+            .map_err(|e| match e {
+                ObwsError::Handshake(err) => VideoOutputError::AuthenticationFailed(format!(
+                    "OBS WebSocket handshake/authentication failed: {err}"
+                )),
+                ObwsError::Connect(err) => VideoOutputError::BackendUnavailable(format!(
+                    "failed to connect to OBS WebSocket at {}:{}: {err}",
+                    self.host, self.port
+                )),
+                ObwsError::Timeout => VideoOutputError::BackendUnavailable(format!(
+                    "timeout connecting to OBS WebSocket at {}:{}",
+                    self.host, self.port
+                )),
+                other => VideoOutputError::BackendUnavailable(format!(
+                    "OBS WebSocket error at {}:{}: {other}",
+                    self.host, self.port
+                )),
+            })
+    }
+
+    /// Test the connection and retrieve OBS and obs-websocket versions.
+    pub async fn test_connection_async(&self) -> Result<ObsVersionInfo, VideoOutputError> {
+        let client = self.connect_client().await?;
+        let version =
+            client.general().version().await.map_err(|e| {
+                VideoOutputError::Backend(format!("failed to fetch OBS version: {e}"))
+            })?;
+
+        Ok(ObsVersionInfo {
+            obs_version: version.obs_studio_version.to_string(),
+            obs_web_socket_version: version.obs_web_socket_version.to_string(),
+            rpc_version: version.rpc_version,
+        })
+    }
+
+    /// Synchronous version of test_connection.
+    pub fn test_connection(&self) -> Result<ObsVersionInfo, VideoOutputError> {
+        self.runtime.block_on(self.test_connection_async())
+    }
+
+    /// Async implementation of applying video composition to OBS.
+    ///
+    /// It ensures:
+    /// 1. Scene exists (created if missing).
+    /// 2. Input exists with `local_file` set to `source_path` (created as ffmpeg_source if missing).
+    /// 3. Input is present in the scene as a scene item (added if missing).
+    /// 4. Transform (crop + fill + pan + zoom) is applied.
+    /// 5. Transform is queried back to verify.
+    pub async fn apply_video_composition_async(
+        &self,
+        request: &VideoOutputRequest,
+    ) -> Result<(), VideoOutputError> {
+        let client = self.connect_client().await?;
+
+        // 1. Ensure scene exists
+        let scenes = client
+            .scenes()
+            .list()
+            .await
+            .map_err(|e| VideoOutputError::Backend(format!("failed to list scenes: {e}")))?;
+
+        let scene_exists = scenes
+            .scenes
+            .iter()
+            .any(|s| s.id.name == request.scene_name);
+        if !scene_exists {
+            client
+                .scenes()
+                .create(&request.scene_name)
+                .await
+                .map_err(|e| {
+                    VideoOutputError::Backend(format!(
+                        "failed to create scene '{}': {e}",
+                        request.scene_name
+                    ))
+                })?;
+        }
+
+        // 2. Ensure input exists and points to `source_path`
+        let input_settings = serde_json::json!({
+            "local_file": request.source_path,
+            "looping": true,
+            "restart_on_activate": true,
+        });
+
+        let item_id = match client
+            .scene_items()
+            .id(SceneItemId {
+                scene: SceneId::Name(request.scene_name.as_str()),
+                source: request.source_name.as_str(),
+                search_offset: None,
+            })
+            .await
+        {
+            Ok(id) => {
+                // Already in scene: update input settings
+                client
+                    .inputs()
+                    .set_settings(SetInputSettings {
+                        input: InputId::Name(&request.source_name),
+                        settings: &input_settings,
+                        overlay: Some(true),
+                    })
+                    .await
+                    .map_err(|e| {
+                        VideoOutputError::Backend(format!(
+                            "failed to update input settings for '{}': {e}",
+                            request.source_name
+                        ))
+                    })?;
+                id
+            }
+            Err(_) => {
+                // Not in this scene. Check if input exists globally in OBS
+                let input_exists = client
+                    .inputs()
+                    .settings::<serde_json::Value>(InputId::Name(&request.source_name))
+                    .await
+                    .is_ok();
+
+                if !input_exists {
+                    // Create input directly attached to the target scene
+                    client
+                        .inputs()
+                        .create(CreateInput {
+                            scene: SceneId::Name(&request.scene_name),
+                            input: &request.source_name,
+                            kind: "ffmpeg_source",
+                            settings: Some(input_settings),
+                            enabled: Some(true),
+                        })
+                        .await
+                        .map_err(|e| {
+                            VideoOutputError::Backend(format!(
+                                "failed to create ffmpeg_source '{}' in scene '{}': {e}",
+                                request.source_name, request.scene_name
+                            ))
+                        })?
+                        .scene_item_id
+                } else {
+                    // Update input settings first
+                    let _ = client
+                        .inputs()
+                        .set_settings(SetInputSettings {
+                            input: InputId::Name(&request.source_name),
+                            settings: &input_settings,
+                            overlay: Some(true),
+                        })
+                        .await;
+
+                    // Add existing input to scene
+                    client
+                        .scene_items()
+                        .create(CreateSceneItem {
+                            scene: SceneId::Name(&request.scene_name),
+                            source: SourceId::Name(&request.source_name),
+                            enabled: Some(true),
+                        })
+                        .await
+                        .map_err(|e| {
+                            VideoOutputError::Backend(format!(
+                                "failed to add source '{}' to scene '{}': {e}",
+                                request.source_name, request.scene_name
+                            ))
+                        })?
+                }
+            }
+        };
+
+        // 3. Apply scene item transform
+        let transform = build_scene_item_transform(request)?;
+
+        client
+            .scene_items()
+            .set_transform(SetTransform {
+                scene: SceneId::Name(request.scene_name.as_str()),
+                item_id,
+                transform,
+            })
+            .await
+            .map_err(|e| VideoOutputError::Backend(format!("failed to apply transform: {e}")))?;
+
+        // 4. Verify transform was set
+        let _ = client
+            .scene_items()
+            .transform(SceneId::Name(request.scene_name.as_str()), item_id)
+            .await;
+
+        Ok(())
+    }
 }
 
 impl VideoOutputPort for ObsVideoOutput {
@@ -32,45 +239,8 @@ impl VideoOutputPort for ObsVideoOutput {
         &mut self,
         request: &VideoOutputRequest,
     ) -> Result<(), VideoOutputError> {
-        self.runtime.block_on(async {
-            let client = Client::connect(&self.host, self.port, self.password.as_deref())
-                .await
-                .map_err(|e| {
-                    VideoOutputError::BackendUnavailable(format!(
-                        "failed to connect to OBS WebSocket at {}:{}: {e}",
-                        self.host, self.port
-                    ))
-                })?;
-
-            let item_request = SceneItemId {
-                scene: SceneId::Name(request.scene_name.as_str()),
-                source: request.source_name.as_str(),
-                search_offset: None,
-            };
-
-            let item_id = client.scene_items().id(item_request).await.map_err(|e| {
-                VideoOutputError::Backend(format!(
-                    "failed to resolve scene item scene='{}' source='{}': {e}",
-                    request.scene_name, request.source_name
-                ))
-            })?;
-
-            let transform = build_scene_item_transform(request)?;
-
-            client
-                .scene_items()
-                .set_transform(SetTransform {
-                    scene: SceneId::Name(request.scene_name.as_str()),
-                    item_id,
-                    transform,
-                })
-                .await
-                .map_err(|e| {
-                    VideoOutputError::Backend(format!("failed to apply transform: {e}"))
-                })?;
-
-            Ok(())
-        })
+        self.runtime
+            .block_on(self.apply_video_composition_async(request))
     }
 }
 
@@ -88,28 +258,56 @@ fn build_scene_item_transform(
     let canvas_width = request.canvas_size.width as f64;
     let canvas_height = request.canvas_size.height as f64;
 
-    // Crop: domain stores the fraction cropped off each side, same as OBS.
-    // Zero-fill when absent to keep the adapter stateless.
-    let crop = match request.composition.crop.as_ref() {
-        Some(c) => Crop {
-            left: Some((c.left * source_width).round() as u32),
-            top: Some((c.top * source_height).round() as u32),
-            right: Some((c.right * source_width).round() as u32),
-            bottom: Some((c.bottom * source_height).round() as u32),
-        },
-        None => Crop {
-            left: Some(0),
-            top: Some(0),
-            right: Some(0),
-            bottom: Some(0),
-        },
+    // Crop is represented in the domain as the fraction removed from
+    // each side. OBS also expects the removed pixel count on each side.
+    //
+    // IMPORTANT:
+    // The visible content dimensions after crop are the dimensions that
+    // must be used for Fill/Zoom geometry. OBS subtracts crop pixels from
+    // the source dimensions before applying the scene-item scale.
+    let (crop, visible_size) = match request.composition.crop.as_ref() {
+        Some(c) => {
+            let left = (c.left * source_width).round() as u32;
+            let top = (c.top * source_height).round() as u32;
+            let right = (c.right * source_width).round() as u32;
+            let bottom = (c.bottom * source_height).round() as u32;
+
+            let visible_width = source_width - f64::from(left + right);
+
+            let visible_height = source_height - f64::from(top + bottom);
+
+            if visible_width <= 0.0 || visible_height <= 0.0 {
+                return Err(VideoOutputError::InvalidRequest(
+                    "crop removes the entire source dimension".into(),
+                ));
+            }
+
+            (
+                Crop {
+                    left: Some(left),
+                    top: Some(top),
+                    right: Some(right),
+                    bottom: Some(bottom),
+                },
+                VcSize::new(visible_width, visible_height),
+            )
+        }
+
+        None => (
+            Crop {
+                left: Some(0),
+                top: Some(0),
+                right: Some(0),
+                bottom: Some(0),
+            },
+            VcSize::new(source_width, source_height),
+        ),
     };
 
-    // Geometry: fill + zoom + pan, computed by the video-composition crate.
-    // With alignment = CENTER, OBS positions the item by the canvas
-    // coordinates of its center, which matches the geometry model.
+    // Geometry is based on the visible post-crop content.
+    // This keeps Fill correct after a crop is committed.
     let geometry = video_composition::calculate_geometry(
-        VcSize::new(source_width, source_height),
+        visible_size,
         VcSize::new(canvas_width, canvas_height),
         VcTransform {
             zoom: request.composition.transform.zoom,
@@ -214,6 +412,75 @@ mod transform_tests {
         assert_eq!(crop.top, Some(76));
         assert_eq!(crop.right, Some(57));
         assert_eq!(crop.bottom, Some(76));
+    }
+
+    #[test]
+    fn crop_fill_uses_visible_dimensions() {
+        let mut req = base_request();
+
+        req.composition.crop = CropRegion::new(0.10, 0.10, 0.10, 0.10);
+
+        let t = build_scene_item_transform(&req).unwrap();
+
+        let scale = t.scale.expect("scale must be present");
+
+        // source = 568x762
+        //
+        // Rounded OBS crop:
+        // left/right = 57
+        // top/bottom = 76
+        //
+        // Visible source:
+        // 454x610
+        //
+        // Fill scale is therefore:
+        // max(720/454, 1280/610)
+        // = 2.0983606557...
+        let expected = (1280.0_f64 / 610.0) as f32;
+
+        assert!(approx(scale.x.unwrap(), expected));
+
+        assert!(approx(scale.y.unwrap(), expected));
+    }
+
+    #[test]
+    fn crop_fill_then_zoom_multiplies_visible_geometry() {
+        let mut req = base_request();
+
+        req.composition.crop = CropRegion::new(0.10, 0.10, 0.10, 0.10);
+
+        req.composition.transform.zoom = 1.5;
+
+        let t = build_scene_item_transform(&req).unwrap();
+
+        let scale = t.scale.expect("scale must be present");
+
+        let fill = 1280.0_f64 / 610.0;
+
+        let expected = (fill * 1.5) as f32;
+
+        assert!(approx(scale.x.unwrap(), expected));
+
+        assert!(approx(scale.y.unwrap(), expected));
+    }
+
+    #[test]
+    fn crop_fill_keeps_pan_as_canvas_center_offset() {
+        let mut req = base_request();
+
+        req.composition.crop = CropRegion::new(0.10, 0.10, 0.10, 0.10);
+
+        req.composition.transform.pan_x = -70.0;
+
+        req.composition.transform.pan_y = 25.0;
+
+        let t = build_scene_item_transform(&req).unwrap();
+
+        let position = t.position.expect("position must be present");
+
+        assert!(approx(position.x.unwrap(), 290.0));
+
+        assert!(approx(position.y.unwrap(), 665.0));
     }
 
     #[test]

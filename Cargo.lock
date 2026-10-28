@@ -431,6 +431,8 @@ dependencies = [
  "domain",
  "obws",
  "ports",
+ "serde",
+ "serde_json",
  "tokio",
  "video-composition",
 ]
