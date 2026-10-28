@@ -74,6 +74,15 @@ export async function testObsConnection(
   return invoke<ObsConnectionStatus>("test_obs_connection", { config });
 }
 
+/**
+ * Retrieve list of all scenes from OBS Studio.
+ */
+export async function listScenes(
+  obsConfig: ObsConnectionConfig
+): Promise<string[]> {
+  return invoke<string[]>("list_scenes", { obsConfig });
+}
+
 // ---------------------------------------------------------------------------
 // Video composition commands
 // ---------------------------------------------------------------------------

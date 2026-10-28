@@ -131,6 +131,12 @@ async fn test_obs_connection(config: ObsConnectionConfig) -> ObsConnectionStatus
     }
 }
 
+#[tauri::command]
+async fn list_scenes(obs_config: ObsConnectionConfig) -> Result<Vec<String>, String> {
+    let output = make_output(&obs_config)?;
+    output.list_scenes_async().await.map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands — video composition
 // ---------------------------------------------------------------------------
@@ -244,6 +250,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             test_obs_connection,
+            list_scenes,
             apply_video_composition,
             get_stream_status,
             start_stream,

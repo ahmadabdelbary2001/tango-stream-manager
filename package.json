@@ -9,6 +9,8 @@
   },
   "scripts": {
     "dev": "turbo dev",
+    "desktop:dev": "pnpm --filter @tango-stream-manager/desktop tauri dev",
+    "desktop:build": "pnpm --filter @tango-stream-manager/desktop tauri build",
     "build": "turbo build",
     "lint": "turbo lint",
     "typecheck": "turbo typecheck",

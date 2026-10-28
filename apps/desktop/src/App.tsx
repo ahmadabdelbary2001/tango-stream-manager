@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import {
   testObsConnection,
+  listScenes,
   applyVideoComposition,
   getStreamStatus,
   startStream,
@@ -13,11 +14,31 @@ import {
 } from "./api/obs";
 import "./App.css";
 
+const SETTINGS_KEY = "tsm_user_settings";
+
+interface PersistedSettings {
+  obsHost?: string;
+  obsPort?: number;
+  sceneName?: string;
+  sourceName?: string;
+  sourcePath?: string;
+  rtmpServer?: string;
+}
+
 export default function App() {
+  const savedSettings: PersistedSettings | null = (() => {
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  })();
+
   // ── OBS Connection ──────────────────────────────────────────────────────
   const [obsConfig, setObsConfig] = useState<ObsConnectionConfig>({
-    host: "127.0.0.1",
-    port: 4455,
+    host: savedSettings?.obsHost ?? "127.0.0.1",
+    port: savedSettings?.obsPort ?? 4455,
     password: "",
   });
 
@@ -31,6 +52,7 @@ export default function App() {
     }
   );
 
+  const [availableScenes, setAvailableScenes] = useState<string[]>([]);
   const [isTesting, setIsTesting] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<{
@@ -39,9 +61,9 @@ export default function App() {
   } | null>(null);
 
   // ── Scene & Composition ─────────────────────────────────────────────────
-  const [sceneName, setSceneName] = useState("Tango Scene");
-  const [sourceName, setSourceName] = useState("Tango Video");
-  const [sourcePath, setSourcePath] = useState("E:\\smoke.mp4");
+  const [sceneName, setSceneName] = useState(savedSettings?.sceneName ?? "Tango Scene");
+  const [sourceName, setSourceName] = useState(savedSettings?.sourceName ?? "Tango Video");
+  const [sourcePath, setSourcePath] = useState(savedSettings?.sourcePath ?? "E:\\smoke.mp4");
 
   const [sourceWidth, setSourceWidth] = useState(568);
   const [sourceHeight, setSourceHeight] = useState(762);
@@ -59,7 +81,9 @@ export default function App() {
   const [cropBottom, setCropBottom] = useState(0.1);
 
   // ── Streaming ───────────────────────────────────────────────────────────
-  const [rtmpServer, setRtmpServer] = useState("rtmp://live.twitch.tv/live");
+  const [rtmpServer, setRtmpServer] = useState(
+    savedSettings?.rtmpServer ?? "rtmp://live.twitch.tv/live"
+  );
   const [streamKey, setStreamKey] = useState("");
   const [showStreamKey, setShowStreamKey] = useState(false);
   const [streamStatus, setStreamStatus] = useState<StreamStatus | null>(null);
@@ -67,6 +91,25 @@ export default function App() {
   const [isStoppingStream, setIsStoppingStream] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const statusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Save non-sensitive settings to localStorage ─────────────────────────
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SETTINGS_KEY,
+        JSON.stringify({
+          obsHost: obsConfig.host,
+          obsPort: obsConfig.port,
+          sceneName,
+          sourceName,
+          sourcePath,
+          rtmpServer,
+        })
+      );
+    } catch {
+      // ignore
+    }
+  }, [obsConfig.host, obsConfig.port, sceneName, sourceName, sourcePath, rtmpServer]);
 
   // ── Init ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -98,6 +141,14 @@ export default function App() {
     try {
       const res = await testObsConnection(obsConfig);
       setConnectionStatus(res);
+      if (res.connected) {
+        try {
+          const scenes = await listScenes(obsConfig);
+          setAvailableScenes(scenes);
+        } catch {
+          // ignore
+        }
+      }
     } catch (err) {
       setConnectionStatus({
         connected: false,
@@ -321,13 +372,26 @@ export default function App() {
 
           <div className="input-row">
             <div className="form-group">
-              <label className="form-label">Scene Name</label>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
+                <label className="form-label" style={{ margin: 0 }}>Scene Name</label>
+                {availableScenes.length > 0 && (
+                  <span style={{ fontSize: "0.75rem", color: "#64748b" }}>
+                    {availableScenes.length} from OBS
+                  </span>
+                )}
+              </div>
               <input
                 className="form-input"
+                list="obs-scenes-list"
                 value={sceneName}
                 onChange={(e) => setSceneName(e.target.value)}
                 placeholder="Tango Scene"
               />
+              <datalist id="obs-scenes-list">
+                {availableScenes.map((s) => (
+                  <option key={s} value={s} />
+                ))}
+              </datalist>
             </div>
             <div className="form-group">
               <label className="form-label">Source Name</label>

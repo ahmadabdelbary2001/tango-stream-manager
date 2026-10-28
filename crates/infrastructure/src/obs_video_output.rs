@@ -107,6 +107,17 @@ impl ObsVideoOutput {
         })
     }
 
+    /// List all scene names configured in OBS.
+    pub async fn list_scenes_async(&self) -> Result<Vec<String>, VideoOutputError> {
+        let client = self.connect_client().await?;
+        let scenes = client
+            .scenes()
+            .list()
+            .await
+            .map_err(|e| VideoOutputError::Backend(format!("failed to list scenes: {e}")))?;
+        Ok(scenes.scenes.into_iter().map(|s| s.id.name).collect())
+    }
+
     /// Synchronous version of test_connection.
     pub fn test_connection(&self) -> Result<ObsVersionInfo, VideoOutputError> {
         self.run_sync(|obs| Box::pin(async move { obs.test_connection_async().await }))
