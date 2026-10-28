@@ -20,8 +20,13 @@ pub struct ObsVersionInfo {
     pub rpc_version: u32,
 }
 
+/// OBS WebSocket output adapter.
+///
+/// Intentionally **does not** embed a Tokio runtime. All `_async` methods
+/// are called directly from Tauri's async commands. The sync `VideoOutputPort`
+/// impl spins up a temporary single-threaded runtime in a dedicated OS thread
+/// so it never conflicts with an outer async context.
 pub struct ObsVideoOutput {
-    runtime: Runtime,
     host: String,
     port: u16,
     password: Option<String>,
@@ -29,13 +34,38 @@ pub struct ObsVideoOutput {
 
 impl ObsVideoOutput {
     pub fn new(host: &str, port: u16, password: Option<String>) -> Result<Self, std::io::Error> {
-        let runtime = Runtime::new()?;
         Ok(Self {
-            runtime,
             host: host.to_string(),
             port,
             password,
         })
+    }
+
+    /// Spawn a dedicated OS thread with its own Tokio runtime and run the
+    /// given closure (which receives a cloned `ObsVideoOutput`) to completion.
+    ///
+    /// This is the only safe way to call async OBS methods from a **sync**
+    /// trait impl when the caller may already be inside an async runtime
+    /// (Tauri, tests, …). Creating the runtime inside a fresh thread avoids
+    /// the Tokio "drop runtime in async context" panic entirely.
+    pub(crate) fn run_sync<F, T, E>(&self, f: F) -> Result<T, E>
+    where
+        F: FnOnce(ObsVideoOutput) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        let cloned = ObsVideoOutput {
+            host: self.host.clone(),
+            port: self.port,
+            password: self.password.clone(),
+        };
+        std::thread::spawn(move || {
+            Runtime::new()
+                .expect("failed to create temporary Tokio runtime")
+                .block_on(f(cloned))
+        })
+        .join()
+        .expect("blocking thread panicked")
     }
 
     /// Asynchronously connect to OBS and return the client.
@@ -79,18 +109,7 @@ impl ObsVideoOutput {
 
     /// Synchronous version of test_connection.
     pub fn test_connection(&self) -> Result<ObsVersionInfo, VideoOutputError> {
-        self.runtime.block_on(self.test_connection_async())
-    }
-
-    /// Run an async future on the internal Tokio runtime.
-    ///
-    /// Used by sibling modules (e.g. `obs_streaming`) that share this
-    /// runtime without needing direct access to the private field.
-    pub(crate) fn block_on<F, T>(&self, future: F) -> T
-    where
-        F: std::future::Future<Output = T>,
-    {
-        self.runtime.block_on(future)
+        self.run_sync(|obs| Box::pin(async move { obs.test_connection_async().await }))
     }
 
     /// Async implementation of applying video composition to OBS.
@@ -250,8 +269,8 @@ impl VideoOutputPort for ObsVideoOutput {
         &mut self,
         request: &VideoOutputRequest,
     ) -> Result<(), VideoOutputError> {
-        self.runtime
-            .block_on(self.apply_video_composition_async(request))
+        let req = request.clone();
+        self.run_sync(|obs| Box::pin(async move { obs.apply_video_composition_async(&req).await }))
     }
 }
 

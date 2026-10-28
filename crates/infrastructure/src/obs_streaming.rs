@@ -124,23 +124,25 @@ impl ObsVideoOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Sync StreamingPort impl — delegates to Tokio runtime.
+// Sync StreamingPort impl — runs async methods in a dedicated OS thread.
 // ---------------------------------------------------------------------------
 
 impl StreamingPort for ObsVideoOutput {
     fn get_stream_status(&self) -> Result<StreamStatus, StreamingError> {
-        self.block_on(self.get_stream_status_async())
+        self.run_sync(|obs| Box::pin(async move { obs.get_stream_status_async().await }))
     }
 
     fn start_stream(&self, config: &StreamConfig) -> Result<(), StreamingError> {
-        self.block_on(self.start_stream_async(config))
+        let cfg = config.clone();
+        self.run_sync(|obs| Box::pin(async move { obs.start_stream_async(&cfg).await }))
     }
 
     fn stop_stream(&self) -> Result<(), StreamingError> {
-        self.block_on(self.stop_stream_async())
+        self.run_sync(|obs| Box::pin(async move { obs.stop_stream_async().await }))
     }
 
     fn set_stream_key(&self, config: &StreamConfig) -> Result<(), StreamingError> {
-        self.block_on(self.set_stream_key_async(config))
+        let cfg = config.clone();
+        self.run_sync(|obs| Box::pin(async move { obs.set_stream_key_async(&cfg).await }))
     }
 }
