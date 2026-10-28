@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use domain::{
-    AdaptationConfig, CropRegion, MediaAssetId, ProfileCompositionConfig, QualityPresetKind,
-    QualitySettings, StreamingProfile, StreamingServiceType, VideoComposition, VideoSource,
+    AdaptationConfig, CropRegion, MediaAssetId, ProfileCompositionConfig, ProfileObsConnection,
+    QualityPresetKind, QualitySettings, StreamingProfile, StreamingServiceType, VideoComposition, VideoSource,
     VideoTransform,
 };
 use infrastructure::{FileProfileRepository, KeyringCredentialStore, ObsVideoOutput};
@@ -193,6 +193,8 @@ pub struct ProfileSummaryDto {
     pub service_type: String,
     pub server_url: String,
     pub has_credential: bool,
+    pub obs_connection: ProfileObsConnection,
+    pub has_obs_password: bool,
     pub quality: QualitySettings,
     pub composition: ProfileCompositionConfig,
     pub adaptation: AdaptationConfig,
@@ -213,6 +215,7 @@ pub struct UpdateProfilePayload {
     pub name: String,
     pub service_type: String,
     pub server_url: String,
+    pub obs_connection: ProfileObsConnection,
     pub quality: QualitySettings,
     pub composition: ProfileCompositionConfig,
     pub adaptation: AdaptationConfig,
@@ -282,6 +285,70 @@ async fn list_scenes(obs_config: ObsConnectionConfig) -> Result<Vec<String>, Str
     output.list_scenes_async().await.map_err(|e| e.to_string())
 }
 
+fn ffprobe_candidates() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    const EXECUTABLE: &str = "ffprobe.exe";
+    #[cfg(not(windows))]
+    const EXECUTABLE: &str = "ffprobe";
+
+    let mut candidates = Vec::new();
+    for name in ["TSM_FFPROBE_PATH", "FFPROBE_PATH"] {
+        if let Some(value) = std::env::var_os(name) {
+            if !value.is_empty() {
+                let path = PathBuf::from(value);
+                if path.is_dir() {
+                    candidates.push(path.join(EXECUTABLE));
+                } else {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
+    // Resolving the bare name uses the process PATH; this remains a useful fallback.
+    candidates.push(PathBuf::from(EXECUTABLE));
+
+    #[cfg(windows)]
+    {
+        for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(root) = std::env::var_os(variable) {
+                let root = PathBuf::from(root);
+                candidates.push(root.join("FFmpeg").join("bin").join(EXECUTABLE));
+                candidates.push(root.join("ffmpeg").join("bin").join(EXECUTABLE));
+            }
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            candidates.push(local_app_data.join("Microsoft").join("WinGet").join("Links").join(EXECUTABLE));
+            let packages = local_app_data.join("Microsoft").join("WinGet").join("Packages");
+            if let Ok(entries) = std::fs::read_dir(packages) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    if !name.starts_with("gyan.ffmpeg") {
+                        continue;
+                    }
+                    let package = entry.path();
+                    candidates.push(package.join(EXECUTABLE));
+                    candidates.push(package.join("bin").join(EXECUTABLE));
+                    if let Ok(children) = std::fs::read_dir(&package) {
+                        for child in children.flatten() {
+                            if !child.file_type().map(|kind| kind.is_dir()).unwrap_or(false) { continue; }
+                            candidates.push(child.path().join(EXECUTABLE));
+                            candidates.push(child.path().join("bin").join(EXECUTABLE));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            let root = PathBuf::from(user_profile);
+            candidates.push(root.join("scoop").join("apps").join("ffmpeg").join("current").join("bin").join(EXECUTABLE));
+            candidates.push(root.join("scoop").join("apps").join("ffmpeg-essentials").join("current").join("bin").join(EXECUTABLE));
+        }
+        candidates.push(PathBuf::from(r"C:\ffmpeg\bin").join(EXECUTABLE));
+        candidates.push(PathBuf::from(r"C:\tools\ffmpeg\bin").join(EXECUTABLE));
+    }
+    candidates
+}
 // ---------------------------------------------------------------------------
 // Tauri command — detect real media dimensions through ffprobe
 // ---------------------------------------------------------------------------
@@ -298,17 +365,33 @@ async fn probe_video_dimensions(source_path: String) -> Result<VideoDimensionsPa
         return Err("The selected video path does not point to an existing file.".into());
     }
 
-    let output = tokio::process::Command::new("ffprobe")
-        .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=s=x:p=0",
-        ])
-        .arg(&path)
-        .output()
-        .await
-        .map_err(|_| "ffprobe was not found in PATH. Install FFmpeg and make ffprobe available, or enter the source dimensions manually.".to_string())?;
+    let args = [
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=s=x:p=0",
+    ];
+    let mut probe_output = None;
+    let mut launch_errors = Vec::new();
+    for executable in ffprobe_candidates() {
+        match tokio::process::Command::new(&executable)
+            .args(&args)
+            .arg(&path)
+            .output()
+            .await
+        {
+            Ok(output) => { probe_output = Some(output); break; }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => launch_errors.push(format!("{}: {error}", executable.display())),
+        }
+    }
+    let output = probe_output.ok_or_else(|| {
+        if launch_errors.is_empty() {
+            "ffprobe was not found on PATH or in common FFmpeg/WinGet locations. Run tsm_install_ffmpeg_and_configure.ps1, or set TSM_FFPROBE_PATH to the full path of ffprobe.exe. Source dimensions remain manually editable.".to_string()
+        } else {
+            format!("Could not launch ffprobe: {}. Set TSM_FFPROBE_PATH to the full path of ffprobe.exe. Source dimensions remain manually editable.", launch_errors.join("; "))
+        }
+    })?;
 
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -661,12 +744,21 @@ async fn set_stream_key(payload: StreamConfigPayload) -> Result<(), String> {
 // Tauri commands — profile & credential management
 // ---------------------------------------------------------------------------
 
+fn obs_password_credential_ref(profile_id: &str) -> String {
+    format!("tsm_obs_password_{profile_id}")
+}
+
 fn to_profile_summary(
     profile: StreamingProfile,
     credential_store: &KeyringCredentialStore,
 ) -> ProfileSummaryDto {
     let has_credential = credential_store
         .get_credential(&profile.credential_ref)
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+    let obs_password_ref = obs_password_credential_ref(&profile.id);
+    let has_obs_password = credential_store
+        .get_credential(&obs_password_ref)
         .map(|opt| opt.is_some())
         .unwrap_or(false);
 
@@ -681,6 +773,8 @@ fn to_profile_summary(
         service_type,
         server_url: profile.server_url,
         has_credential,
+        obs_connection: profile.obs_connection,
+        has_obs_password,
         quality: profile.quality,
         composition: profile.composition,
         adaptation: profile.adaptation,
@@ -782,9 +876,10 @@ fn create_profile(
 
     if let Some(key) = payload.stream_key {
         if !key.trim().is_empty() {
-            let _ = state
-                .credential_store
-                .set_credential(&profile.credential_ref, key.trim());
+            if let Err(error) = state.credential_store.set_credential(&profile.credential_ref, key.trim()) {
+                let _ = state.profile_repo.delete_profile(&profile.id);
+                return Err(format!("The profile was not created because its stream key could not be stored securely: {error}"));
+            }
         }
     }
 
@@ -809,6 +904,16 @@ fn update_profile(
         StreamingServiceType::Tango
     };
     profile.server_url = payload.server_url.trim().to_string();
+    profile.obs_connection = ProfileObsConnection {
+        host: payload.obs_connection.host.trim().to_string(),
+        port: payload.obs_connection.port,
+    };
+    if profile.obs_connection.host.is_empty() {
+        return Err("OBS host cannot be empty".into());
+    }
+    if profile.obs_connection.port == 0 {
+        return Err("OBS WebSocket port must be between 1 and 65535".into());
+    }
     profile.quality = payload.quality;
     profile.composition = payload.composition;
     profile.adaptation = payload.adaptation;
@@ -840,14 +945,25 @@ fn duplicate_profile(id: String, state: State<'_, AppState>) -> Result<ProfileSu
     let new_name = format!("{} (Copy)", profile.name);
     let duplicated = profile.duplicate(&new_id, &new_name);
 
-    // If original had a secret, copy it securely to the new profile's credential reference
-    if let Ok(Some(secret)) = state
+    // Copy secrets to distinct per-profile vault entries; never share credential references.
+    if let Some(secret) = state
         .credential_store
         .get_credential(&profile.credential_ref)
+        .map_err(|e| format!("Failed to read the original profile stream key securely: {e}"))?
     {
-        let _ = state
-            .credential_store
-            .set_credential(&duplicated.credential_ref, &secret);
+        state.credential_store
+            .set_credential(&duplicated.credential_ref, &secret)
+            .map_err(|e| format!("Failed to copy the stream key to the duplicate profile securely: {e}"))?;
+    }
+    let old_obs_password_ref = obs_password_credential_ref(&profile.id);
+    let new_obs_password_ref = obs_password_credential_ref(&duplicated.id);
+    if let Some(secret) = state.credential_store
+        .get_credential(&old_obs_password_ref)
+        .map_err(|e| format!("Failed to read the original OBS password securely: {e}"))?
+    {
+        state.credential_store
+            .set_credential(&new_obs_password_ref, &secret)
+            .map_err(|e| format!("Failed to copy the OBS password to the duplicate profile securely: {e}"))?;
     }
 
     state
@@ -862,6 +978,8 @@ fn duplicate_profile(id: String, state: State<'_, AppState>) -> Result<ProfileSu
 fn delete_profile(id: String, state: State<'_, AppState>) -> Result<(), String> {
     if let Ok(Some(p)) = state.profile_repo.get_profile(&id) {
         let _ = state.credential_store.delete_credential(&p.credential_ref);
+        let obs_password_ref = obs_password_credential_ref(&p.id);
+        let _ = state.credential_store.delete_credential(&obs_password_ref);
     }
     state
         .profile_repo
@@ -914,6 +1032,37 @@ fn set_profile_stream_key(
     Ok(())
 }
 
+#[tauri::command]
+fn get_profile_obs_password(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let profile = state.profile_repo.get_profile(&id).map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("profile '{id}' not found"))?;
+    let key_ref = obs_password_credential_ref(&profile.id);
+    state.credential_store.get_credential(&key_ref).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_profile_obs_password(
+    id: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let profile = state.profile_repo.get_profile(&id).map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("profile '{id}' not found"))?;
+    let key_ref = obs_password_credential_ref(&profile.id);
+    if password.trim().is_empty() {
+        match state.credential_store.get_credential(&key_ref).map_err(|e| e.to_string())? {
+            Some(_) => state.credential_store.delete_credential(&key_ref).map_err(|e| e.to_string())?,
+            None => {},
+        }
+    } else {
+        state.credential_store.set_credential(&key_ref, password.trim()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tauri app entry point
 // ---------------------------------------------------------------------------
@@ -955,6 +1104,8 @@ pub fn run() {
             delete_profile,
             get_profile_stream_key,
             set_profile_stream_key,
+            get_profile_obs_password,
+            set_profile_obs_password,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

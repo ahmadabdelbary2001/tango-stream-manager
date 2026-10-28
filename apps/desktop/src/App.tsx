@@ -19,6 +19,8 @@ import {
   deleteProfile,
   getProfileStreamKey,
   setProfileStreamKey,
+  getProfileObsPassword,
+  setProfileObsPassword,
   ObsConnectionConfig,
   ObsConnectionStatus,
   ApplyCompositionPayload,
@@ -29,27 +31,11 @@ import {
 } from "./api/obs";
 import "./App.css";
 
-const SETTINGS_KEY = "tsm_connection_settings";
-
-interface PersistedConnectionSettings {
-  obsHost?: string;
-  obsPort?: number;
-}
-
 export default function App() {
-  const savedConnection: PersistedConnectionSettings | null = (() => {
-    try {
-      const raw = localStorage.getItem(SETTINGS_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
-  })();
-
-  // ── OBS Connection ──────────────────────────────────────────────────────
+  // Connection settings are loaded from the selected profile. Passwords are read only from OS Credential Manager.
   const [obsConfig, setObsConfig] = useState<ObsConnectionConfig>({
-    host: savedConnection?.obsHost ?? "127.0.0.1",
-    port: savedConnection?.obsPort ?? 4455,
+    host: "127.0.0.1",
+    port: 4455,
     password: "",
   });
 
@@ -95,8 +81,10 @@ export default function App() {
   // Empty until a real local video is selected/entered and its dimensions are detected or entered manually.
   const [sourcePath, setSourcePath] = useState("");
 
-  const [sourceWidth, setSourceWidth] = useState(0);
-  const [sourceHeight, setSourceHeight] = useState(0);
+  // Source Size is user-editable; ffprobe is only an optional convenience.
+  // Preserve the original geometry defaults and do not require external probing.
+  const [sourceWidth, setSourceWidth] = useState(568);
+  const [sourceHeight, setSourceHeight] = useState(762);
   const [isDetectingSourceDimensions, setIsDetectingSourceDimensions] = useState(false);
   const [sourceDimensionsMessage, setSourceDimensionsMessage] = useState<{
     success: boolean;
@@ -146,29 +134,25 @@ export default function App() {
   const [isStoppingStream, setIsStoppingStream] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const statusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const latestProfileRef = useRef<ProfileSummaryDto | null>(null);
+  const skipCompositionPersistenceRef = useRef(false);
+  const skipConnectionPersistenceRef = useRef(false);
+  const skipStreamKeyPersistenceRef = useRef(false);
+  const skipObsPasswordPersistenceRef = useRef(false);
+  const [isSavingObsConnection, setIsSavingObsConnection] = useState(false);
+  const [obsConnectionMessage, setObsConnectionMessage] = useState<{ success: boolean; message: string } | null>(null);
   const [, startTransition] = useTransition();
 
-  // Save non-sensitive connection settings
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        SETTINGS_KEY,
-        JSON.stringify({
-          obsHost: obsConfig.host,
-          obsPort: obsConfig.port,
-        })
-      );
-    } catch {
-      // ignore
-    }
-  }, [obsConfig.host, obsConfig.port]);
 
   // Init: test OBS connection and load profiles
   useEffect(() => {
-    handleTestConnection();
     loadProfiles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    latestProfileRef.current = activeProfile;
+  }, [activeProfile]);
 
   // Recalculate Safe Pan Limits whenever geometry inputs change
   useEffect(() => {
@@ -223,7 +207,7 @@ export default function App() {
       if (statusPollRef.current) clearInterval(statusPollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionStatus.connected]);
+  }, [connectionStatus.connected, obsConfig.host, obsConfig.port, obsConfig.password]);
 
   // ── Profiles Management Handlers ────────────────────────────────────────
   async function loadProfiles() {
@@ -243,27 +227,108 @@ export default function App() {
   }
 
   async function applyProfileToState(profile: ProfileSummaryDto) {
+    skipCompositionPersistenceRef.current = true;
+    skipConnectionPersistenceRef.current = true;
+    skipStreamKeyPersistenceRef.current = true;
+    skipObsPasswordPersistenceRef.current = true;
     setActiveProfileState(profile);
+
+    // Restore all source geometry and canvas values belonging to this profile.
     setSceneName(profile.composition.scene_name);
     setSourceName(profile.composition.source_name);
+    setSourcePath(profile.composition.source_path ?? "");
+    setSourceWidth(profile.composition.source_width > 0 ? profile.composition.source_width : 568);
+    setSourceHeight(profile.composition.source_height > 0 ? profile.composition.source_height : 762);
     setCanvasWidth(profile.composition.canvas_width);
     setCanvasHeight(profile.composition.canvas_height);
+    setZoom(profile.composition.zoom ?? 1.0);
+    setPanX(profile.composition.pan_x ?? 0);
+    setPanY(profile.composition.pan_y ?? 0);
+    const crop = profile.composition.crop ?? { left: 0.1, top: 0.1, right: 0.1, bottom: 0.1 };
+    setHasCrop(profile.composition.has_crop ?? (profile.composition.crop !== null));
+    setCropLeft(crop.left);
+    setCropTop(crop.top);
+    setCropRight(crop.right);
+    setCropBottom(crop.bottom);
+    setSourceDimensionsMessage(null);
 
-    // Fetch secret stream key securely from OS Keyring
-    try {
-      const key = await getProfileStreamKey(profile.id);
-      setStreamKey(key ?? "");
-    } catch {
-      setStreamKey("");
+    const nextConfig: ObsConnectionConfig = {
+      host: profile.obs_connection?.host || "127.0.0.1",
+      port: profile.obs_connection?.port || 4455,
+      password: "",
+    };
+    setObsConnectionMessage(null);
+
+    // Load both secrets before changing the connection state. This avoids a transient
+    // blank-password render accidentally deleting a saved password during profile switch.
+    const [keyResult, passwordResult] = await Promise.allSettled([
+      getProfileStreamKey(profile.id),
+      getProfileObsPassword(profile.id),
+    ]);
+    setStreamKey(keyResult.status === "fulfilled" ? keyResult.value ?? "" : "");
+
+    if (passwordResult.status === "fulfilled") {
+      const connection: ObsConnectionConfig = { ...nextConfig, password: passwordResult.value ?? "" };
+      setObsConfig(connection);
+      await handleTestConnection(connection);
+    } else {
+      setObsConfig(nextConfig);
+      setConnectionStatus({
+        connected: false,
+        obs_version: null,
+        obs_web_socket_version: null,
+        rpc_version: null,
+        error_message: `Could not load this profile's OBS password from the OS credential store: ${String(passwordResult.reason)}`,
+      });
     }
   }
 
+
+  async function persistCurrentComposition(profile: ProfileSummaryDto): Promise<ProfileSummaryDto> {
+    const host = obsConfig.host.trim();
+    const port = Math.trunc(Number(obsConfig.port));
+    if (!host || port < 1 || port > 65535) {
+      throw new Error("Enter a valid OBS host and a port from 1 to 65535 before switching profiles or starting a stream.");
+    }
+    const password = (obsConfig.password ?? "").trim();
+    // Persist non-empty passwords when leaving the profile or starting a stream; blank input
+    // never deletes a secret implicitly. Removing a stored password requires the explicit Save button.
+    if (password) await setProfileObsPassword(profile.id, password);
+    const saved = await updateProfile({
+      ...profile,
+      obs_connection: { host, port },
+      composition: {
+        ...profile.composition,
+        scene_name: sceneName,
+        source_name: sourceName,
+        source_path: sourcePath,
+        source_width: sourceWidth,
+        source_height: sourceHeight,
+        canvas_width: canvasWidth,
+        canvas_height: canvasHeight,
+        zoom,
+        pan_x: panX,
+        pan_y: panY,
+        has_crop: hasCrop,
+        crop: { left: cropLeft, top: cropTop, right: cropRight, bottom: cropBottom },
+      },
+    });
+    setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
+    setActiveProfileState((current) => current?.id === saved.id ? saved : current);
+    return saved;
+  }
   async function handleSwitchProfile(profileId: string) {
     if (streamStatus?.active) {
       alert("Cannot switch streaming profiles while live streaming. Stop the stream first.");
       return;
     }
     try {
+      if (activeProfile) {
+        await persistCurrentComposition(activeProfile);
+        if (streamKey.trim() || activeProfile.has_credential) {
+          await setProfileStreamKey(activeProfile.id, streamKey);
+        }
+      }
       const selected = await setActiveProfileApi(profileId);
       applyProfileToState(selected);
       setKeySavedMessage(null);
@@ -369,6 +434,8 @@ export default function App() {
       setTimeout(() => setKeySavedMessage(null), 4000);
       const updated = await listProfiles();
       setProfiles(updated);
+      const refreshedActive = updated.find((profile) => profile.id === activeProfile.id);
+      if (refreshedActive) setActiveProfileState(refreshedActive);
     } catch (err) {
       alert(`Failed to save stream key securely: ${err}`);
     } finally {
@@ -376,18 +443,47 @@ export default function App() {
     }
   }
 
+  async function handleSaveObsConnection() {
+    if (!activeProfile) return;
+    const host = obsConfig.host.trim();
+    const port = Math.trunc(Number(obsConfig.port));
+    if (!host || port < 1 || port > 65535) {
+      setObsConnectionMessage({ success: false, message: "Enter a valid OBS host and a port from 1 to 65535." });
+      return;
+    }
+
+    const connection: ObsConnectionConfig = { host, port, password: (obsConfig.password ?? "").trim() };
+    setIsSavingObsConnection(true);
+    setObsConnectionMessage(null);
+    try {
+      if (!connection.password && activeProfile.has_obs_password) {
+        await setProfileObsPassword(activeProfile.id, "");
+      }
+      const saved = await persistCurrentComposition(activeProfile);
+      setActiveProfileState(saved);
+      setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
+      setObsConfig(connection);
+      setObsConnectionMessage({ success: true, message: "OBS host, port, and password saved for this profile. The password is stored in the OS credential vault." });
+      await handleTestConnection(connection);
+    } catch (err) {
+      setObsConnectionMessage({ success: false, message: `Could not save this profile's OBS connection: ${String(err)}` });
+    } finally {
+      setIsSavingObsConnection(false);
+    }
+  }
+
   // ── Connection handlers ─────────────────────────────────────────────────
-  async function handleTestConnection() {
+  async function handleTestConnection(config: ObsConnectionConfig = obsConfig) {
     setIsTesting(true);
     setApplyResult(null);
     try {
-      const res = await testObsConnection(obsConfig);
+      const res = await testObsConnection(config);
       setConnectionStatus(res);
       if (res.connected) {
         try {
-          const scenes = await listScenes(obsConfig);
+          const scenes = await listScenes(config);
           setAvailableScenes(scenes);
-          const vs = await getObsVideoSettings(obsConfig);
+          const vs = await getObsVideoSettings(config);
           setObsVideoSettingsState(vs);
         } catch {
           // ignore
@@ -429,7 +525,7 @@ export default function App() {
     } catch (err) {
       setSourceDimensionsMessage({
         success: false,
-        message: `${String(err)} If ffprobe is unavailable, enter the video dimensions manually.`,
+        message: String(err),
       });
     } finally {
       setIsDetectingSourceDimensions(false);
@@ -485,6 +581,119 @@ export default function App() {
     setPanY(0);
     setHasCrop(false);
   }
+  // Auto-save the selected profile's stream key to its isolated OS credential entry.
+  useEffect(() => {
+    if (!activeProfile) return;
+    if (skipStreamKeyPersistenceRef.current) {
+      skipStreamKeyPersistenceRef.current = false;
+      return;
+    }
+    if (!streamKey.trim() && !activeProfile.has_credential) return;
+
+    const profileId = activeProfile.id;
+    const value = streamKey;
+    const timer = window.setTimeout(async () => {
+      const latest = latestProfileRef.current;
+      if (!latest || latest.id !== profileId) return;
+      try {
+        await setProfileStreamKey(profileId, value);
+        const updated = await listProfiles();
+        setProfiles(updated);
+        const refreshed = updated.find((profile) => profile.id === profileId);
+        if (refreshed) setActiveProfileState((current) => current?.id === profileId ? refreshed : current);
+      } catch (err) {
+        console.error("Failed to auto-save this profile's stream key securely:", err);
+      }
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [activeProfile?.id, streamKey]);
+
+  // Auto-save the OBS WebSocket password to this profile's separate OS credential entry.
+  useEffect(() => {
+    if (!activeProfile) return;
+    if (skipObsPasswordPersistenceRef.current) {
+      skipObsPasswordPersistenceRef.current = false;
+      return;
+    }
+    const profileId = activeProfile.id;
+    const value = (obsConfig.password ?? "").trim();
+    const timer = window.setTimeout(async () => {
+      const latest = latestProfileRef.current;
+      if (!latest || latest.id !== profileId) return;
+      if (!value && !latest.has_obs_password) return;
+      try {
+        await setProfileObsPassword(profileId, value);
+        const updated = await listProfiles();
+        setProfiles(updated);
+        const refreshed = updated.find((profile) => profile.id === profileId);
+        if (refreshed) setActiveProfileState((current) => current?.id === profileId ? refreshed : current);
+      } catch (err) {
+        console.error("Failed to auto-save the OBS password securely for this profile:", err);
+      }
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [activeProfile?.id, obsConfig.password]);
+
+  // Debounce profile-owned composition and OBS host/port together to avoid competing profile writes.
+  useEffect(() => {
+    if (!activeProfile) return;
+    if (skipCompositionPersistenceRef.current || skipConnectionPersistenceRef.current) {
+      skipCompositionPersistenceRef.current = false;
+      skipConnectionPersistenceRef.current = false;
+      return;
+    }
+
+    const profileId = activeProfile.id;
+    const crop = { left: cropLeft, top: cropTop, right: cropRight, bottom: cropBottom };
+    const host = obsConfig.host.trim();
+    const port = Math.trunc(Number(obsConfig.port));
+    const connectionIsValid = Boolean(host) && port >= 1 && port <= 65535;
+    const existing = activeProfile.composition;
+    const sameCrop = existing.has_crop === hasCrop && JSON.stringify(existing.crop ?? { left: 0.1, top: 0.1, right: 0.1, bottom: 0.1 }) === JSON.stringify(crop);
+    const sameComposition = existing.scene_name === sceneName &&
+      existing.source_name === sourceName && existing.source_path === sourcePath &&
+      existing.source_width === sourceWidth && existing.source_height === sourceHeight &&
+      existing.canvas_width === canvasWidth && existing.canvas_height === canvasHeight &&
+      existing.zoom === zoom && existing.pan_x === panX && existing.pan_y === panY && sameCrop;
+    const existingConnection = activeProfile.obs_connection;
+    const sameConnection = connectionIsValid && host === existingConnection.host && port === existingConnection.port;
+    if (sameComposition && (sameConnection || !connectionIsValid)) return;
+
+    const timer = window.setTimeout(async () => {
+      const latest = latestProfileRef.current;
+      if (!latest || latest.id !== profileId) return;
+      const updated: ProfileSummaryDto = {
+        ...latest,
+        obs_connection: connectionIsValid ? { host, port } : latest.obs_connection,
+        composition: {
+          ...latest.composition,
+          scene_name: sceneName,
+          source_name: sourceName,
+          source_path: sourcePath,
+          source_width: sourceWidth,
+          source_height: sourceHeight,
+          canvas_width: canvasWidth,
+          canvas_height: canvasHeight,
+          zoom,
+          pan_x: panX,
+          pan_y: panY,
+          has_crop: hasCrop,
+          crop,
+        },
+      };
+      try {
+        const saved = await updateProfile(updated);
+        setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item));
+        setActiveProfileState((current) => current?.id === saved.id ? saved : current);
+      } catch (err) {
+        console.error("Failed to auto-save settings to profile:", err);
+      }
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [activeProfile?.id, sceneName, sourceName, sourcePath, sourceWidth, sourceHeight,
+      canvasWidth, canvasHeight, zoom, panX, panY, hasCrop, cropLeft, cropTop, cropRight, cropBottom,
+      obsConfig.host, obsConfig.port]);
+
 
   // ── Quality Settings Staging handlers ───────────────────────────────────
   function handlePresetChange(preset: "balanced" | "low_bandwidth" | "very_low_bandwidth") {
@@ -592,8 +801,13 @@ export default function App() {
     setIsStartingStream(true);
     setStreamError(null);
     try {
-      // Auto-save key to profile credential store if updated
+      // Persist this profile's composition/connection and keep its secrets in separate vault entries.
+      await persistCurrentComposition(activeProfile);
       await setProfileStreamKey(activeProfile.id, streamKey);
+      const refreshedProfiles = await listProfiles();
+      setProfiles(refreshedProfiles);
+      const refreshedActive = refreshedProfiles.find((profile) => profile.id === activeProfile.id);
+      if (refreshedActive) setActiveProfileState(refreshedActive);
       await startProfileStream({
         obs_config: obsConfig,
         profile_id: activeProfile.id,
@@ -826,7 +1040,7 @@ export default function App() {
           </div>
 
           <div className="form-group">
-            <label className="form-label">Password (Optional)</label>
+            <label className="form-label">Password (Optional) {activeProfile?.has_obs_password ? "· Stored securely for this profile" : "· Not saved"}</label>
             <input
               className="form-input"
               type="password"
@@ -841,13 +1055,28 @@ export default function App() {
             />
           </div>
 
-          <button
-            className="btn btn-secondary"
-            onClick={handleTestConnection}
-            disabled={isTesting}
-          >
-            {isTesting ? "Testing…" : "Test OBS Connection"}
-          </button>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              className="btn btn-secondary"
+              onClick={() => handleTestConnection()}
+              disabled={isTesting}
+            >
+              {isTesting ? "Testing…" : "Test OBS Connection"}
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={handleSaveObsConnection}
+              disabled={!activeProfile || isSavingObsConnection || isStreaming}
+              title="Save this profile's OBS host, port, and password securely."
+            >
+              {isSavingObsConnection ? "Saving Connection…" : "Save Connection to Profile"}
+            </button>
+          </div>
+          {obsConnectionMessage && (
+            <div className={`alert-box ${obsConnectionMessage.success ? "alert-success" : "alert-error"}`}>
+              <span>{obsConnectionMessage.message}</span>
+            </div>
+          )}
 
           {!connectionStatus.connected && connectionStatus.error_message && (
             <div className="alert-box alert-error">
@@ -908,8 +1137,6 @@ export default function App() {
               value={sourcePath}
               onChange={(e) => {
                 setSourcePath(e.target.value);
-                setSourceWidth(0);
-                setSourceHeight(0);
                 setPanX(0);
                 setPanY(0);
                 setSourceDimensionsMessage(null);
@@ -924,7 +1151,7 @@ export default function App() {
               >
                 {isDetectingSourceDimensions ? "Detecting dimensions…" : "Detect Actual Dimensions (ffprobe)"}
               </button>
-              <span className="form-label">You can also enter Width and Height manually below.</span>
+              <span className="form-label">Detection is optional. Verify/edit Source Size for this file; Zoom 1.0x remains centered Fill/Cover.</span>
             </div>
             {sourceDimensionsMessage && (
               <div className={`alert-box ${sourceDimensionsMessage.success ? "alert-success" : "alert-error"}`}>
@@ -1371,7 +1598,7 @@ export default function App() {
                 <button
                   className="btn btn-secondary"
                   onClick={handleSaveStreamKey}
-                  disabled={isStreaming || !streamKey || isSavingKey}
+                  disabled={isStreaming || isSavingKey || (!streamKey.trim() && !activeProfile?.has_credential)}
                 >
                   {isSavingKey ? "Saving…" : "Save Key"}
                 </button>

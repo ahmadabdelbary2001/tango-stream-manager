@@ -147,11 +147,24 @@ export interface QualitySettings {
   keyframe_interval_sec: number;
 }
 
+export interface ProfileObsConnection {
+  host: string;
+  port: number;
+}
+
 export interface ProfileCompositionConfig {
   scene_name: string;
   source_name: string;
   canvas_width: number;
   canvas_height: number;
+  source_path: string;
+  source_width: number;
+  source_height: number;
+  zoom: number;
+  pan_x: number;
+  pan_y: number;
+  has_crop: boolean;
+  crop: CropPayload | null;
 }
 
 export interface AdaptationConfig {
@@ -170,6 +183,8 @@ export interface ProfileSummaryDto {
   service_type: string;
   server_url: string;
   has_credential: boolean;
+  obs_connection: ProfileObsConnection;
+  has_obs_password: boolean;
   quality: QualitySettings;
   composition: ProfileCompositionConfig;
   adaptation: AdaptationConfig;
@@ -188,6 +203,7 @@ export interface UpdateProfilePayload {
   name: string;
   service_type: string;
   server_url: string;
+  obs_connection: ProfileObsConnection;
   quality: QualitySettings;
   composition: ProfileCompositionConfig;
   adaptation: AdaptationConfig;
@@ -336,4 +352,12 @@ export async function setProfileStreamKey(
   streamKey: string
 ): Promise<void> {
   return invoke<void>("set_profile_stream_key", { id, streamKey });
+}
+
+export async function getProfileObsPassword(id: string): Promise<string | null> {
+  return invoke<string | null>("get_profile_obs_password", { id });
+}
+
+export async function setProfileObsPassword(id: string, password: string): Promise<void> {
+  return invoke<void>("set_profile_obs_password", { id, password });
 }

@@ -97,13 +97,46 @@ impl QualityPresetKind {
     }
 }
 
-/// Scene, source, and canvas geometry preferences for a profile.
+/// Non-secret OBS WebSocket connection settings owned by one profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileObsConnection {
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for ProfileObsConnection {
+    fn default() -> Self {
+        Self { host: "127.0.0.1".into(), port: 4455 }
+    }
+}
+
+/// Crop region saved with a profile. Values are normalized fractions from 0.0 to 1.0.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ProfileCropConfig {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+/// Scene, media source, canvas, and composition values owned by one profile.
+/// serde(default) keeps profile files created by older application versions loadable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProfileCompositionConfig {
     pub scene_name: String,
     pub source_name: String,
     pub canvas_width: u32,
     pub canvas_height: u32,
+    pub source_path: String,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub zoom: f64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub has_crop: bool,
+    pub crop: Option<ProfileCropConfig>,
 }
 
 impl Default for ProfileCompositionConfig {
@@ -113,6 +146,14 @@ impl Default for ProfileCompositionConfig {
             source_name: "Tango Video".into(),
             canvas_width: 720,
             canvas_height: 1280,
+            source_path: String::new(),
+            source_width: 568,
+            source_height: 762,
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            has_crop: false,
+            crop: Some(ProfileCropConfig { left: 0.1, top: 0.1, right: 0.1, bottom: 0.1 }),
         }
     }
 }
@@ -154,8 +195,11 @@ pub struct StreamingProfile {
     pub name: String,
     pub service_type: StreamingServiceType,
     pub server_url: String,
-    /// Stable credential key reference for OS credential vault (e.g. "tsm_profile_<id>")
+    /// Stable credential key reference for the profile stream key.
     pub credential_ref: String,
+    /// OBS host and port are profile-owned; its password remains in the OS credential vault.
+    #[serde(default)]
+    pub obs_connection: ProfileObsConnection,
     pub quality: QualitySettings,
     pub composition: ProfileCompositionConfig,
     pub adaptation: AdaptationConfig,
@@ -174,6 +218,7 @@ impl StreamingProfile {
             service_type: StreamingServiceType::Tango,
             server_url: String::new(),
             credential_ref,
+            obs_connection: ProfileObsConnection::default(),
             quality: QualitySettings::default(),
             composition: ProfileCompositionConfig::default(),
             adaptation: AdaptationConfig::default(),
@@ -192,6 +237,7 @@ impl StreamingProfile {
             service_type: self.service_type,
             server_url: self.server_url.clone(),
             credential_ref,
+            obs_connection: self.obs_connection.clone(),
             quality: self.quality.clone(),
             composition: self.composition.clone(),
             adaptation: self.adaptation.clone(),

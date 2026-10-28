@@ -6,8 +6,8 @@ pub mod video;
 pub use adaptation::{AdaptationAction, AdaptiveBitrateController};
 pub use media::{MediaAsset, MediaAssetId, MediaVariant, MediaVariantId};
 pub use profile::{
-    AdaptationConfig, ProfileCompositionConfig, QualityPresetKind, QualitySettings,
-    StreamingProfile, StreamingServiceType,
+    AdaptationConfig, ProfileCompositionConfig, ProfileCropConfig, ProfileObsConnection,
+    QualityPresetKind, QualitySettings, StreamingProfile, StreamingServiceType,
 };
 pub use video::{
     AspectRatio, CropRegion, VideoComposition, VideoCompositionDraft, VideoSource, VideoTransform,
